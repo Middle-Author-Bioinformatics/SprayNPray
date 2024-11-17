@@ -596,6 +596,11 @@ if args.blast == "NA":
     db = args.ref
 
     print("Running Diamond BLAST")
+    print(
+        "diamond blastp --db %s --query %s-proteins.faa "
+        "--outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle "
+        "--out %s.blast --max-target-seqs %s --evalue 1E-15 --threads %s --query-cover 50 --subject-cover 50"
+        % (db, args.g, args.g, args.hits, args.t))
     os.system(
         "diamond blastp --db %s --query %s-proteins.faa "
         "--outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle "
