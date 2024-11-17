@@ -506,60 +506,6 @@ if args.fa:
     if args.domain:
         print("Domain restriction: " + args.domain)
 
-
-##  DEPRACATED ORF-MODE
-# if args.o != "NA":
-#     file = open(args.o)
-#     file = fasta2(file)
-#     if args.makedb:
-#         print("Running DIAMOND: making DIAMOND database")
-#         os.system("diamond makedb --in %s --db %s.dmnd" % (args.ref, args.ref))
-#
-#     print("Running DIAMOND BLAST")
-#     os.system(
-#         "diamond blastp --db %s.dmnd --query %s-proteins.faa "
-#             "--outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle "
-#             "--out %s.blast --max-target-seqs 50 --evalue 1E-15 --threads %d --query-cover 50 --subject-cover 50"
-#         % (args.ref, args.o, args.o, args.t))
-#
-#     print("Preparing summary: %s" % args.out)
-#
-#     aaiDict = defaultdict(list)
-#     blastDict = defaultdict(list)
-#     blast = open("%s.blast" % args.o)
-#     for i in blast:
-#         ls = i.rstrip().split("\t")
-#         orf = ls[0]
-#         name = (ls[12])
-#         name = name.split("]")[0]
-#         name = name.split("[")[1]
-#         blastDict[orf].append(name)
-#         aai = ls[2]
-#         aaiDict[orf].append(float(aai))
-#
-#     out = open(args.out, "w")
-#     out.write(
-#         "ORF" + "," + "Average_AAI" + "," + "closest_blast_hits" + "\n")
-#     for i in file.keys():
-#
-#         hitsList = blastDict[i]
-#         try:
-#             AAI = statistics.mean(aaiDict[i])
-#         except statistics.StatisticsError:
-#             AAI = "NA"
-#         out.write(
-#             i + "," + str(AAI) + ",")
-#
-#         for j in hitsList:
-#             try:
-#                 out.write(j + "; ")
-#             except TypeError:
-#                 pass
-#         out.write("\n")
-#
-#     print("Finished!")
-
-
 file = open(args.g)
 file = fasta2(file)
 total = 0
@@ -648,55 +594,15 @@ if args.blast == "NA":
     os.system("mv %s-proteins-new.faa %s-proteins.faa" % (args.g, args.g))
 
     db = args.ref
-    if args.makedb:
-        print("Running Diamond: making DIAMOND BLAST database")
-        if args.debug:
-            os.system("diamond makedb --in %s --db %s.dmnd" % (args.ref, args.ref))
-            db = "%s.dmnd" % args.ref
-        else:
-            os.system("diamond makedb --in %s --db %s.dmnd > /dev/null 2>&1" % (args.ref, args.ref))
-            db = "%s.dmnd" % args.ref
-
-    else:
-        ref = args.ref
-        try:
-            dbfile = open("%s.dmnd" % ref)
-            db = "%s.dmnd" % ref
-        except FileNotFoundError:
-            try:
-                dbfile = open("%s" % ref)
-                db = "%s" % ref
-            except FileNotFoundError:
-                print("SprayNPray cannot locate the diamond blast database file")
-                answer = input("Would you like to SprayNPray to make a diamond blast db? If not, SprayNPray will exit. (y/n): ")
-                if answer == "y":
-                    if args.debug:
-                        os.system("diamond makedb --in %s --db %s.dmnd" % (ref, ref))
-                        db = "%s.dmnd" % ref
-                    else:
-                        os.system("diamond makedb --in %s --db %s.dmnd > /dev/null 2>&1" % (ref, ref))
-                        db = "%s.dmnd" % ref
-                else:
-                    print("Exiting")
-                    raise SystemExit
 
     print("Running Diamond BLAST")
-    if args.debug:
-        os.system(
-            "diamond blastp --db %s --query %s-proteins.faa "
-            "--outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle "
-            "--out %s.blast --max-target-seqs %s --evalue 1E-15 --threads %s --query-cover 50 --subject-cover 50"
-            % (db, args.g, args.g, args.hits, args.t))
+    os.system(
+        "diamond blastp --db %s --query %s-proteins.faa "
+        "--outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle "
+        "--out %s.blast --max-target-seqs %s --evalue 1E-15 --threads %s --query-cover 50 --subject-cover 50"
+        % (db, args.g, args.g, args.hits, args.t))
 
-        blastFile = "%s.blast" % (args.g)
-    else:
-        os.system(
-            "diamond blastp --db %s --query %s-proteins.faa "
-            "--outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore stitle "
-            "--out %s.blast --max-target-seqs %s --evalue 1E-15 --threads %s --query-cover 50 --subject-cover 50 > /dev/null 2>&1"
-            % (db, args.g, args.g, args.hits, args.t))
-
-        blastFile = "%s.blast" % (args.g)
+    blastFile = "%s.blast" % (args.g)
 else:
     blastFile = args.blast
 
@@ -713,7 +619,7 @@ if count == 0:
 try:
     blast = open(blastFile)
 except FileNotFoundError:
-    print("")
+    print("no blast file")
     raise SystemExit
 
 out = open("%s-top%s.csv" % (outfilename, args.hits), "w")
@@ -742,23 +648,6 @@ total = 0
 for i in file.keys():
     seq = file[i]
     gcDict[i] = str(GC(seq))
-
-    # total += len(seq)
-    # gc = 0
-    # for bp in seq:
-    #     if bp == "C" or bp == "G":
-    #         GC += 1
-    #         gc += 1
-    # gcDict[i] = str( float(gc/len(seq)) * 100 )
-
-# print("Calculating tetranucleotide frequency")
-# gcDict = defaultdict(lambda: defaultdict(lambda: 'EMPTY'))
-# GC = 0
-# total = 0
-# for i in file.keys():
-#     seq = file[i]
-#     tet(seq)
-
 
 print("Preparing summary: %s.csv" % outfilename)
 
