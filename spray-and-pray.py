@@ -16,7 +16,7 @@ from sklearn import metrics
 from sklearn.datasets import make_blobs
 from sklearn.cluster import AgglomerativeClustering
 from scipy.cluster.hierarchy import dendrogram, linkage
-from Bio.SeqUtils import GC
+from Bio.SeqUtils import gc_fraction
 from Bio.Seq import Seq
 
 
