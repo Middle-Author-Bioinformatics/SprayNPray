@@ -547,14 +547,14 @@ if args.blast == "NA":
 
             if args.meta:
                 print("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c" % (args.g, args.g, args.g))
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c > /dev/null 2>&1" % (args.g, args.g, args.g))
+                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c -q > /dev/null 2>&1" % (args.g, args.g, args.g))
             else:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -c > /dev/null 2>&1" % (args.g, args.g, args.g))
+                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -c -q > /dev/null 2>&1" % (args.g, args.g, args.g))
         else:
             if args.meta:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta > /dev/null 2>&1" % (args.g, args.g, args.g))
+                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -q > /dev/null 2>&1" % (args.g, args.g, args.g))
             else:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn > /dev/null 2>&1" % (args.g, args.g, args.g))
+                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -q > /dev/null 2>&1" % (args.g, args.g, args.g))
 
     # checking the prodigal-produced .faa file that will be used for downstream analysis
     faa = open("%s-proteins.faa" % args.g)
