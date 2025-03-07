@@ -652,7 +652,7 @@ gcDict = defaultdict(lambda: defaultdict(lambda: 'EMPTY'))
 total = 0
 for i in file.keys():
     seq = file[i]
-    gcDict[i] = str(GC(seq))
+    gcDict[i] = str(gc_fraction(seq))
 
 print("Preparing summary: %s.csv" % outfilename)
 
