@@ -452,7 +452,7 @@ for i in file:
     location = i.rstrip()
 location = allButTheLast(location, "/")
 
-silvaFile = location + "/taxmap_slv_ssu_ref_nr_138.1.txt"
+silvaFile = "/home/ark/MAB/bin/SprayNPray/taxmap_slv_ssu_ref_nr_138.1.txt"
 os.system("rm mainDir.txt")
 
 if args.out == "NA":
@@ -701,11 +701,7 @@ silvaDict = defaultdict(lambda: defaultdict(lambda: 'unclassified'))
 try:
     silva = open(silvaFile)
 except FileNotFoundError:
-    if args.debug:
-        print(os.getcwd())
-        print(silvaFile)
-        print(silva)
-        print("")
+    os.system("gunzip %s.gz" % silvaFile)
     print("SprayNPray cannot find the following file: taxmap_slv_ssu_ref_nr_138.1.txt. \n"
           "There is a good chance that it is present in its gzipped form in the SprayNPray \n"
           "directory/folder on your system. Please unzip this file and try running the program \n"
