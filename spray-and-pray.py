@@ -693,6 +693,7 @@ silvaDict = defaultdict(lambda: defaultdict(lambda: 'unclassified'))
 try:
     silva = open(silvaFile)
 except FileNotFoundError:
+    print(silvaFile)
     os.system("gunzip %s.gz" % silvaFile)
     print("SprayNPray cannot find the following file: taxmap_slv_ssu_ref_nr_138.1.txt. \n"
           "There is a good chance that it is present in its gzipped form in the SprayNPray \n"
@@ -848,19 +849,19 @@ for i in file.keys():
                     Class = j
 
                 if args.lvl == "Domain":
-                    out.write(Domain + "; ")
+                    out.write(str(Domain) + "; ")
 
                 elif args.lvl == "Phylum":
-                    out.write(Phylum + "; ")
+                    out.write(str(Phylum) + "; ")
 
                 elif args.lvl == "Class":
-                    out.write(Class + "; ")
+                    out.write(str(Class) + "; ")
 
                 elif args.lvl == "Genus":
-                    out.write(Genus + "; ")
+                    out.write(str(Genus) + "; ")
 
                 elif args.lvl == "species":
-                    out.write(species + "; ")
+                    out.write(str(species) + "; ")
 
                 else:
                     break
