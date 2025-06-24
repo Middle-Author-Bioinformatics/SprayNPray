@@ -322,6 +322,8 @@ parser.add_argument('-depth', type=str, help="Input depth/coverage information (
 
 parser.add_argument('-out', type=str, help="Basename for output files", default="NA")
 
+parser.add_argument('-dir', type=str, help="output directory", default="NA")
+
 parser.add_argument('-lvl', type=str, help="Level of the taxonomic hierarchy to include in the summary file (Domain, Phylum, Class, Genus, species)", default="NA")
 
 parser.add_argument('-t', type=int, help="number of threads to use for DIAMOND BLAST", default=1)
@@ -455,22 +457,12 @@ location = allButTheLast(location, "/")
 silvaFile = "/home/ark/MAB/bin/SprayNPray/taxmap_slv_ssu_ref_nr_138.1.txt"
 os.system("rm mainDir.txt")
 
-if args.out == "NA":
-    genome = args.g
-    outfilename = allButTheLast(genome, ".") + ".spraynpray"
-    os.system("mkdir -p %s" % allButTheLast(genome, "."))
-    outdir = allButTheLast(genome, ".")
+if args.out == "NA" or args.dir == "NA":
+    print("Provide output name!")
+    raise SystemExit
 else:
     outfilename = args.out
-    if lastItem(outfilename) == "/":
-        outfilename = outfilename[0:len(outfilename)-1]
-        outfilename = lastItem(outfilename.split("/"))
-        outdir = outfilename
-
-    else:
-        outfilename = lastItem(outfilename.split("/"))
-        os.system("mkdir -p %s" % args.out)
-        outdir = args.out
+    outdir = args.dir
 
 if args.fa:
     print("SprayNPray will write a FASTA file with contigs matching user-specified metrics: " + outfilename + "-contigs.fa")
@@ -627,7 +619,7 @@ except FileNotFoundError:
     print("no blast file")
     raise SystemExit
 
-out = open("%s-top%s.csv" % (outfilename, args.hits), "w")
+out = open("%s/%s-top%s.csv" % (outdir, outfilename, args.hits), "w")
 out.write("orf,taxa,top_hit\n")
 for i in blast:
     ls = i.rstrip().split("\t")
@@ -798,7 +790,7 @@ for i in silva:
 
         silvaDict[Domain]["Domain"] = Domain
 
-out = open(outfilename + ".csv", "w")
+out = open(outdir + "/" + outfilename + ".csv", "w")
 out.write("contig" + "," + "contig_length" + "," + "hits_per_kb" + "," + "cov" + "," + "GC-content" + "," + "Average_AAI" + "," + "closest_blast_hits" + "\n")
 for i in file.keys():
     if args.bam != "NA":
@@ -887,7 +879,7 @@ if args.blast == "NA":
 
 
 ############## WORDCLOUD LOOP ####################
-out = open(outfilename + ".words.csv", "w")
+out = open(outdir + "/" + outfilename + ".words.csv", "w")
 summary = open("%s/%s.csv" % (outdir, outfilename))
 for i in summary:
     ls = i.rstrip().split(",")
