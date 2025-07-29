@@ -332,7 +332,7 @@ parser.add_argument('--makedb', type=str, help="if the DIAMOND database does not
                                                     "(i.e. file with extension .dmnd), and you would like the program t"
                                                "o run  diamond makedb, provide this flag", const=True, nargs="?")
 
-parser.add_argument('--inlude_id', type=str, help="", const=True, nargs="?")
+parser.add_argument('--include_id', type=str, help="", const=True, nargs="?")
 
 parser.add_argument('--bin', type=str, help="Including this flag will direct SprayNPray to perform hierarchical "
                                             "clustering based on 1) tetranucleotide frequency, 2) GC-content, 3) codon usage bias, "
@@ -671,7 +671,8 @@ for i in blast:
     aai = ls[2]
     if ls[0] not in redunDict.keys():
         redunDict[ls[0]].append(name)
-        if args.inlude_id:
+        print(contig)
+        if args.include_id:
             blastDict[contig].append(name + "_" + ls[2])
         else:
             blastDict[contig].append(name)
