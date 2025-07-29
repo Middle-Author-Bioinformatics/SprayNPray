@@ -332,6 +332,8 @@ parser.add_argument('--makedb', type=str, help="if the DIAMOND database does not
                                                     "(i.e. file with extension .dmnd), and you would like the program t"
                                                "o run  diamond makedb, provide this flag", const=True, nargs="?")
 
+parser.add_argument('--inlude_id', type=str, help="", const=True, nargs="?")
+
 parser.add_argument('--bin', type=str, help="Including this flag will direct SprayNPray to perform hierarchical "
                                             "clustering based on 1) tetranucleotide frequency, 2) GC-content, 3) codon usage bias, "
                                             "and 4) read coverage (if BAM file is provided). SprayNPray will then split the input contigs into multiple FASTA files, "
@@ -669,7 +671,10 @@ for i in blast:
     aai = ls[2]
     if ls[0] not in redunDict.keys():
         redunDict[ls[0]].append(name)
-        blastDict[contig].append(name)
+        if args.inlude_id:
+            blastDict[contig].append(name + "_" + ls[2])
+        else:
+            blastDict[contig].append(name)
         aaiDict[contig].append(float(aai))
 blast.close()
 
@@ -879,9 +884,9 @@ out.close()
 os.system("mv %s.csv %s" % (outfilename, outdir))
 # os.system("mv %s-proteins.faa %s/" % (args.g, outdir))
 # os.system("mv %s-cds.ffn %s/" % (args.g, outdir))
-if args.blast == "NA":
-    os.system("mv %s.blast %s/" % (args.g, outdir))
-    blastFile = "%s/%s.blast" % (outdir, args.g)
+# if args.blast == "NA":
+    # os.system("mv %s.blast %s/" % (args.g, outdir))
+    # blastFile = "%s/%s.blast" % (outdir, args.g)
 
 
 ############## WORDCLOUD LOOP ####################
