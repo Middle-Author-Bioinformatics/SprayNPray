@@ -338,8 +338,10 @@ parser.add_argument('--bin', type=str, help="Including this flag will direct Spr
                                             "each with its own summary file. This file is incompatible with the --fa flag.", const=True, nargs="?")
 
 parser.add_argument('--spades', type=str, help="is this a SPAdes assembly, with the original SPAdes headers? If so, "
-                                               "then you can provide this flag, and BinBlaster will summarize using the coverage "
-                                               "information provided in the SPAdes headers", const=True, nargs="?")
+                                               "then you can provide this flag for coverage info.", const=True, nargs="?")
+
+parser.add_argument('--megahit', type=str, help="is this a Megahit assembly, with the original Megahit headers? If so, "
+                                               "then you can provide this flag for coverage info.", const=True, nargs="?")
 
 parser.add_argument('--custom_ref', type=str, help="the reference database is not nr", const=True, nargs="?")
 
@@ -802,6 +804,9 @@ for i in file.keys():
         length = depthDict[i]["length"]
     elif args.spades:
         depth = lastItem(i.split("_"))
+        length = len(file[i])
+    elif args.megahit:
+        depth = i.split(" ")[2].split("=")[1]
         length = len(file[i])
     else:
         depth = "Unknown"
