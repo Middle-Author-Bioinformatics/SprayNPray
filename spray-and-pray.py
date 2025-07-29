@@ -826,6 +826,7 @@ for i in file.keys():
 
     if args.lvl == "NA":
         for j in hitsList:
+            print(j)
             try:
                 out.write(j + "; ")
             except TypeError:
