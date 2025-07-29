@@ -825,67 +825,69 @@ for i in file.keys():
         print(hitsList)
         print("")
     try:
-        AAI = statistics.mean(aaiDict[i])
+        AAI = statistics.mean(aaiDict[i.split(" ")[0]])
     except statistics.StatisticsError:
         AAI = "NA"
-    out.write(i + "," + str(length) + "," + str(len(hitsList) / (length / 1000)) + "," + str(depth) + "," + str(gc) + "," + str(AAI) + ",")
 
-    if args.lvl == "NA":
-        for j in hitsList:
-            try:
-                out.write(j + "; ")
-            except TypeError:
-                pass
-    else:
-        for j in hitsList:
-            try:
-                Genus = j.split(" ")[0]
-                if Genus in ["Candidatus", "uncultured"]:
-                    Genus = j.split(" ")[1]
+    if len(hitsList) > 0:
+        out.write(i + "," + str(length) + "," + str(len(hitsList) / (length / 1000)) + "," + str(depth) + "," + str(gc) + "," + str(AAI) + ",")
 
+        if args.lvl == "NA":
+            for j in hitsList:
                 try:
-                    species = j.split(" ")[1]
-                    if species == "sp.":
-                        species = j.split(" ")[2]
-                except IndexError:
-                    species = "unclassified"
+                    out.write(j + "; ")
+                except TypeError:
+                    pass
+        else:
+            for j in hitsList:
+                try:
+                    Genus = j.split(" ")[0]
+                    if Genus in ["Candidatus", "uncultured"]:
+                        Genus = j.split(" ")[1]
 
-                Domain = silvaDict[Genus]["Domain"]
-                Phylum = silvaDict[Genus]["Phylum"]
-                Class = silvaDict[Genus]["Class"]
+                    try:
+                        species = j.split(" ")[1]
+                        if species == "sp.":
+                            species = j.split(" ")[2]
+                    except IndexError:
+                        species = "unclassified"
 
-                if len(silvaDict[Genus]) == 0:
-                    Domain = "unclassifed"
-                    Phylum = "unclassifed"
-                    Class = "unclassifed"
+                    Domain = silvaDict[Genus]["Domain"]
+                    Phylum = silvaDict[Genus]["Phylum"]
+                    Class = silvaDict[Genus]["Class"]
 
-                if re.findall(r'symbiont', j):
-                    Domain = j
-                    Phylum = j
-                    Class = j
+                    if len(silvaDict[Genus]) == 0:
+                        Domain = "unclassifed"
+                        Phylum = "unclassifed"
+                        Class = "unclassifed"
 
-                if args.lvl == "Domain":
-                    out.write(str(Domain) + "; ")
+                    if re.findall(r'symbiont', j):
+                        Domain = j
+                        Phylum = j
+                        Class = j
 
-                elif args.lvl == "Phylum":
-                    out.write(str(Phylum) + "; ")
+                    if args.lvl == "Domain":
+                        out.write(str(Domain) + "; ")
 
-                elif args.lvl == "Class":
-                    out.write(str(Class) + "; ")
+                    elif args.lvl == "Phylum":
+                        out.write(str(Phylum) + "; ")
 
-                elif args.lvl == "Genus":
-                    out.write(str(Genus) + "; ")
+                    elif args.lvl == "Class":
+                        out.write(str(Class) + "; ")
 
-                elif args.lvl == "species":
-                    out.write(str(species) + "; ")
+                    elif args.lvl == "Genus":
+                        out.write(str(Genus) + "; ")
 
-                else:
-                    break
+                    elif args.lvl == "species":
+                        out.write(str(species) + "; ")
 
-            except TypeError:
-                pass
+                    else:
+                        break
 
-    out.write("\n")
+                except TypeError:
+                    pass
+    
+        out.write("\n")
 out.close()
 os.system("mv %s.csv %s" % (outfilename, outdir))
 # os.system("mv %s-proteins.faa %s/" % (args.g, outdir))
