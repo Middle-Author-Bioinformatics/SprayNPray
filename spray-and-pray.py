@@ -671,12 +671,13 @@ for i in blast:
     aai = ls[2]
     if ls[0] not in redunDict.keys():
         redunDict[ls[0]].append(name)
-        print(contig)
-        if args.include_id:
-            blastDict[contig].append(name + "_" + ls[2])
-        else:
-            blastDict[contig].append(name)
-        aaiDict[contig].append(float(aai))
+
+    print(contig)
+    if args.include_id:
+        blastDict[contig].append(name + "_" + ls[2])
+    else:
+        blastDict[contig].append(name)
+    aaiDict[contig].append(float(aai))
 blast.close()
 
 if args.bam != "NA":
