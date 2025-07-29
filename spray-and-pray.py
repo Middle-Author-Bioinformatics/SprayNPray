@@ -819,6 +819,8 @@ for i in file.keys():
         length = len(file[i])
     gc = gcDict[i]
     hitsList = blastDict[i]
+    print(i)
+    print(hitsList)
     try:
         AAI = statistics.mean(aaiDict[i])
     except statistics.StatisticsError:
