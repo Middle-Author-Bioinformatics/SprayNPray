@@ -818,7 +818,7 @@ for i in file.keys():
         depth = "Unknown"
         length = len(file[i])
     gc = gcDict[i]
-    hitsList = blastDict[i]
+    hitsList = blastDict[i.split(" ")[0]]
     print(i)
     print(hitsList)
     try:
