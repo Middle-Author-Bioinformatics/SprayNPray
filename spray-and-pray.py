@@ -672,7 +672,6 @@ for i in blast:
     if ls[0] not in redunDict.keys():
         redunDict[ls[0]].append(name)
 
-    print(contig)
     if args.include_id:
         blastDict[contig].append(name + "_" + ls[2])
     else:
@@ -821,8 +820,10 @@ for i in file.keys():
         length = len(file[i])
     gc = gcDict[i]
     hitsList = blastDict[i.split(" ")[0]]
-    print(i.split(" ")[0])
-    print(hitsList)
+    if len(hitsList) > 0:
+        print(i.split(" ")[0])
+        print(hitsList)
+        print("")
     try:
         AAI = statistics.mean(aaiDict[i])
     except statistics.StatisticsError:
@@ -831,7 +832,6 @@ for i in file.keys():
 
     if args.lvl == "NA":
         for j in hitsList:
-            print(j)
             try:
                 out.write(j + "; ")
             except TypeError:
