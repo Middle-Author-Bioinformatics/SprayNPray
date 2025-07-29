@@ -697,12 +697,12 @@ try:
 except FileNotFoundError:
     print(silvaFile)
     os.system("gunzip %s.gz" % silvaFile)
-    print("SprayNPray cannot find the following file: taxmap_slv_ssu_ref_nr_138.1.txt. \n"
-          "There is a good chance that it is present in its gzipped form in the SprayNPray \n"
-          "directory/folder on your system. Please unzip this file and try running the program \n"
-          "again. If you just waited for a length DIAMOND run to finish, you can provide the \n"
-          "DIAMOND BLAST output (%s.blast) to the command when you re-run using the -blast argument" % args.g)
-    raise SystemExit
+    # print("SprayNPray cannot find the following file: taxmap_slv_ssu_ref_nr_138.1.txt. \n"
+    #       "There is a good chance that it is present in its gzipped form in the SprayNPray \n"
+    #       "directory/folder on your system. Please unzip this file and try running the program \n"
+    #       "again. If you just waited for a length DIAMOND run to finish, you can provide the \n"
+    #       "DIAMOND BLAST output (%s.blast) to the command when you re-run using the -blast argument" % args.g)
+    # raise SystemExit
 
 for i in silva:
     ls = i.rstrip().split("\t")
