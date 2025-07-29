@@ -332,7 +332,7 @@ parser.add_argument('--makedb', type=str, help="if the DIAMOND database does not
                                                     "(i.e. file with extension .dmnd), and you would like the program t"
                                                "o run  diamond makedb, provide this flag", const=True, nargs="?")
 
-parser.add_argument('--include_id', type=str, help="include perc_id in the CSV file hits column", const=True, nargs="?")
+parser.add_argument('--inlude_id', type=str, help="", const=True, nargs="?")
 
 parser.add_argument('--bin', type=str, help="Including this flag will direct SprayNPray to perform hierarchical "
                                             "clustering based on 1) tetranucleotide frequency, 2) GC-content, 3) codon usage bias, "
@@ -671,10 +671,10 @@ for i in blast:
     aai = ls[2]
     if ls[0] not in redunDict.keys():
         redunDict[ls[0]].append(name)
-        if args.include_id:
+        if args.inlude_id:
             blastDict[contig].append(name + "_" + ls[2])
         else:
-            blastDict[contig].append(name)
+
         aaiDict[contig].append(float(aai))
 blast.close()
 
@@ -702,6 +702,7 @@ try:
 except FileNotFoundError:
     print(silvaFile)
     os.system("gunzip %s.gz" % silvaFile)
+    silva = open(silvaFile)
     # print("SprayNPray cannot find the following file: taxmap_slv_ssu_ref_nr_138.1.txt. \n"
     #       "There is a good chance that it is present in its gzipped form in the SprayNPray \n"
     #       "directory/folder on your system. Please unzip this file and try running the program \n"
