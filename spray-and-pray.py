@@ -501,7 +501,7 @@ if args.fa:
         print("Domain restriction: " + args.domain)
 
 file = open(args.g)
-file = fasta2(file)
+file = fasta(file)
 total = 0
 for i in file.keys():
     total += len(file[i])
