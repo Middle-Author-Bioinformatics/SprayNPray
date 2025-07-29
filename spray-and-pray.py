@@ -674,7 +674,7 @@ for i in blast:
         if args.inlude_id:
             blastDict[contig].append(name + "_" + ls[2])
         else:
-
+            blastDict[contig].append(name)
         aaiDict[contig].append(float(aai))
 blast.close()
 
