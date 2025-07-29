@@ -673,7 +673,7 @@ for i in blast:
         redunDict[ls[0]].append(name)
 
     if args.include_id:
-        blastDict[contig].append(name + "_" + ls[2])
+        blastDict[contig].append(name + " " + ls[2])
     else:
         blastDict[contig].append(name)
     aaiDict[contig].append(float(aai))
