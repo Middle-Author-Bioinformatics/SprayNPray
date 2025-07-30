@@ -618,7 +618,7 @@ if count == 0:
     raise SystemExit
 
 try:
-    
+
     blast = open(blastFile)
 except FileNotFoundError:
     print("no blast file")
@@ -673,11 +673,11 @@ for i in blast:
     if ls[0] not in redunDict.keys():
         redunDict[ls[0]].append(name)
 
-    if args.include_id:
-        blastDict[contig].append(name + " " + ls[2])
-    else:
-        blastDict[contig].append(name)
-    aaiDict[contig].append(float(aai))
+        if args.include_id:
+            blastDict[contig].append(name + " " + ls[2])
+        else:
+            blastDict[contig].append(name)
+        aaiDict[contig].append(float(aai))
 blast.close()
 
 if args.bam != "NA":
