@@ -886,7 +886,7 @@ for i in file.keys():
 
                 except TypeError:
                     pass
-    
+
         out.write("\n")
 out.close()
 os.system("mv %s.csv %s" % (outfilename, outdir))
