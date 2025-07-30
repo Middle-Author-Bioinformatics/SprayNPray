@@ -618,6 +618,7 @@ if count == 0:
     raise SystemExit
 
 try:
+    
     blast = open(blastFile)
 except FileNotFoundError:
     print("no blast file")
