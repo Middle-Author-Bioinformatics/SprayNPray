@@ -404,6 +404,8 @@ parser.add_argument('-minGenes', type=float, help="minimum number of genes that 
 
 parser.add_argument('-minLength', type=float, help="minimum length of gene to include in the BLAST analysis (default = 90)", default=90)
 
+parser.add_argument('-table', type=float, help="translation table to use for Prodigal (default = 11)", default="11")
+
 parser.add_argument('--test', type=str, help="add this flag during testing of this program's dependencies", const=True, nargs="?")
 
 parser.add_argument('--debug', type=str, help="add this flag to debug an issue caused by a dependency", const=True, nargs="?")
@@ -527,30 +529,30 @@ if args.blast == "NA":
         if args.c:
 
             if args.meta:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c" % (
-                args.g, args.g, args.g))
+                os.system("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c" % (
+                args.table, args.g, args.g, args.g))
             else:
                 os.system(
-                    "prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -c" % (args.g, args.g, args.g))
+                    "prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -c" % (args.table, args.g, args.g, args.g))
         else:
             if args.meta:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta" % (
-                args.g, args.g, args.g))
+                os.system("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta" % (
+                args.table, args.g, args.g, args.g))
             else:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn" % (args.g, args.g, args.g))
+                os.system("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn" % (args.table, args.g, args.g, args.g))
     else:
         if args.c:
 
             if args.meta:
-                print("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c" % (args.g, args.g, args.g))
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c -q > /dev/null 2>&1" % (args.g, args.g, args.g))
+                print("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c" % (args.table, args.g, args.g, args.g))
+                os.system("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -c -q > /dev/null 2>&1" % (args.table, args.g, args.g, args.g))
             else:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -c -q > /dev/null 2>&1" % (args.g, args.g, args.g))
+                os.system("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -c -q > /dev/null 2>&1" % (args.table, args.g, args.g, args.g))
         else:
             if args.meta:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -q > /dev/null 2>&1" % (args.g, args.g, args.g))
+                os.system("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -p meta -q > /dev/null 2>&1" % (args.table, args.g, args.g, args.g))
             else:
-                os.system("prodigal -i %s -a %s-proteins.faa -d %s-cds.ffn -q > /dev/null 2>&1" % (args.g, args.g, args.g))
+                os.system("prodigal -g %s -i %s -a %s-proteins.faa -d %s-cds.ffn -q > /dev/null 2>&1" % (args.table, args.g, args.g, args.g))
 
     # checking the prodigal-produced .faa file that will be used for downstream analysis
     faa = open("%s-proteins.faa" % args.g)
