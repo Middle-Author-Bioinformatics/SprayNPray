@@ -804,7 +804,16 @@ for i in silva:
         silvaDict[Domain]["Domain"] = Domain
 
 out = open(outdir + "/" + outfilename + ".csv", "w")
+outGenus = open(outdir + "/" + outfilename + ".genus.csv", "w")
+outClass = open(outdir + "/" + outfilename + ".class.csv", "w")
+outPhylum = open(outdir + "/" + outfilename + ".phylum.csv", "w")
+outDomain = open(outdir + "/" + outfilename + ".domain.csv", "w")
 out.write("contig" + "," + "contig_length" + "," + "hits_per_kb" + "," + "cov" + "," + "GC-content" + "," + "Average_AAI" + "," + "closest_blast_hits" + "\n")
+outGenus.write("contig" + "," + "contig_length" + "," + "hits_per_kb" + "," + "cov" + "," + "GC-content" + "," + "Average_AAI" + "," + "closest_blast_hits" + "\n")
+outClass.write("contig" + "," + "contig_length" + "," + "hits_per_kb" + "," + "cov" + "," + "GC-content" + "," + "Average_AAI" + "," + "closest_blast_hits" + "\n")
+outPhylum.write("contig" + "," + "contig_length" + "," + "hits_per_kb" + "," + "cov" + "," + "GC-content" + "," + "Average_AAI" + "," + "closest_blast_hits" + "\n")
+outDomain.write("contig" + "," + "contig_length" + "," + "hits_per_kb" + "," + "cov" + "," + "GC-content" + "," + "Average_AAI" + "," + "closest_blast_hits" + "\n")
+
 for i in file.keys():
     if args.bam != "NA":
         depth = depthDict[i]["depth"]
@@ -834,65 +843,64 @@ for i in file.keys():
 
     if len(hitsList) > 0:
         out.write(i + "," + str(length) + "," + str(len(hitsList) / (length / 1000)) + "," + str(depth) + "," + str(gc) + "," + str(AAI) + ",")
+        outGenus.write(i + "," + str(length) + "," + str(len(hitsList) / (length / 1000)) + "," + str(depth) + "," + str(gc) + "," + str(AAI) + ",")
+        outClass.write(i + "," + str(length) + "," + str(len(hitsList) / (length / 1000)) + "," + str(depth) + "," + str(gc) + "," + str(AAI) + ",")
+        outPhylum.write(i + "," + str(length) + "," + str(len(hitsList) / (length / 1000)) + "," + str(depth) + "," + str(gc) + "," + str(AAI) + ",")
+        outDomain.write(i + "," + str(length) + "," + str(len(hitsList) / (length / 1000)) + "," + str(depth) + "," + str(gc) + "," + str(AAI) + ",")
 
-        if args.lvl == "NA":
-            for j in hitsList:
+        for j in hitsList:
+            out.write(j + "; ")
+
+            try:
+                Genus = j.split(" ")[0]
+                if Genus in ["Candidatus", "uncultured"]:
+                    Genus = j.split(" ")[1]
+
                 try:
-                    out.write(j + "; ")
-                except TypeError:
-                    pass
-        else:
-            for j in hitsList:
-                try:
-                    Genus = j.split(" ")[0]
-                    if Genus in ["Candidatus", "uncultured"]:
-                        Genus = j.split(" ")[1]
+                    species = j.split(" ")[1]
+                    if species == "sp.":
+                        species = j.split(" ")[2]
+                except IndexError:
+                    species = "unclassified"
 
-                    try:
-                        species = j.split(" ")[1]
-                        if species == "sp.":
-                            species = j.split(" ")[2]
-                    except IndexError:
-                        species = "unclassified"
+                Domain = silvaDict[Genus]["Domain"]
+                Phylum = silvaDict[Genus]["Phylum"]
+                Class = silvaDict[Genus]["Class"]
 
-                    Domain = silvaDict[Genus]["Domain"]
-                    Phylum = silvaDict[Genus]["Phylum"]
-                    Class = silvaDict[Genus]["Class"]
+                if len(silvaDict[Genus]) == 0:
+                    Domain = "unclassifed"
+                    Phylum = "unclassifed"
+                    Class = "unclassifed"
 
-                    if len(silvaDict[Genus]) == 0:
-                        Domain = "unclassifed"
-                        Phylum = "unclassifed"
-                        Class = "unclassifed"
+                if re.findall(r'symbiont', j):
+                    Domain = j
+                    Phylum = j
+                    Class = j
 
-                    if re.findall(r'symbiont', j):
-                        Domain = j
-                        Phylum = j
-                        Class = j
+                outGenus.write(str(Genus) + "; ")
+                outClass.write(str(Class) + "; ")
+                outPhylum.write(str(Phylum) + "; ")
+                outDomain.write(str(Domain) + "; ")
 
-                    if args.lvl == "Domain":
-                        out.write(str(Domain) + "; ")
-
-                    elif args.lvl == "Phylum":
-                        out.write(str(Phylum) + "; ")
-
-                    elif args.lvl == "Class":
-                        out.write(str(Class) + "; ")
-
-                    elif args.lvl == "Genus":
-                        out.write(str(Genus) + "; ")
-
-                    elif args.lvl == "species":
-                        out.write(str(species) + "; ")
-
-                    else:
-                        break
-
-                except TypeError:
-                    pass
+            except TypeError:
+                pass
 
         out.write("\n")
+        outGenus.write("\n")
+        outClass.write("\n")
+        outPhylum.write("\n")
+        outDomain.write("\n")
 out.close()
+outGenus.close()
+outClass.close()
+outPhylum.close()
+outDomain.close()
 os.system("mv %s.csv %s" % (outfilename, outdir))
+os.system("mv %s.genus.csv %s/" % (outfilename, outdir))
+os.system("mv %s.class.csv %s/" % (outfilename, outdir))
+os.system("mv %s.phylum.csv %s/" % (outfilename, outdir))
+os.system("mv %s.domain.csv %s/" % (outfilename, outdir))
+
 # os.system("mv %s-proteins.faa %s/" % (args.g, outdir))
 # os.system("mv %s-cds.ffn %s/" % (args.g, outdir))
 # if args.blast == "NA":
