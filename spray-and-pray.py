@@ -626,6 +626,9 @@ except FileNotFoundError:
     print("no blast file")
     raise SystemExit
 
+if not os.path.exists(outdir):
+    os.makedirs(outdir)
+
 out = open("%s/%s-top%s.csv" % (outdir, outfilename, args.hits), "w")
 out.write("orf,taxa,top_hit\n")
 for i in blast:
