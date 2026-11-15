@@ -1,4 +1,9 @@
 # SprayNPray
+
+**Assembly-backed V2 prototype:** see [README_v2.md](README_v2.md) for the new
+standalone `spraynpray_v2.py` pipeline with first-25-ORF sampling, source-genome
+metadata, and taxdump-based inference.
+
 ## Rapid and simple taxonomic profiling of genome and metagenome contigs 
 #### - Bin validation
 #### - Metagenome profiling
