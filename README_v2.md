@@ -34,10 +34,14 @@ contig**, ordered by their leftmost genomic coordinate regardless of strand,
 are searched. Contigs with fewer genes use all available genes. Change this
 with `--orfs-per-contig 50`, or search every predicted gene with
 `--orfs-per-contig all`. Prodigal still sees the full input for gene prediction.
+The summary lists **one actual top protein hit per selected ORF**, with its
+organism name, protein accession, representative source assembly and identity.
+An ORF without a qualifying alignment is listed as `no hit`.
 
-The output directory must be new or empty. Input contig IDs must be unique in
-their first whitespace-delimited header field. FASTA, map and assembly TSV
-inputs may be gzip compressed (`.gz`).
+Rerun the same command with the **same output directory** to reuse completed
+Prodigal predictions and DIAMOND alignments automatically and regenerate the
+reports. Input contig IDs must be unique in their first whitespace-delimited
+header field. FASTA, map and assembly TSV inputs may be gzip compressed (`.gz`).
 
 ## Reference inputs
 
@@ -129,6 +133,7 @@ miss downstream discordance. Use `all` when broader contig evidence matters.
 | File | Contents |
 | --- | --- |
 | `contigs.csv` | One row per input contig, including those with no ORFs or hits. Starts with SprayNPray's original seven column names, followed by ORF counts, prediction, support, status and rank columns. |
+| `top_hits.csv` | Exactly one row per selected ORF, in contig/coordinate order, including `no_hit` rows. One top protein and one representative source assembly with metadata per matching ORF. |
 | `matches.csv` | One row per retained ORF/protein/source-genome combination. Starts with `orf,taxa,top_hit`, then alignment metrics, mapping status and **every assembly metadata column**, prefixed `assembly_`. Unknown mappings are explicitly listed. |
 | `orf_taxonomy.csv` | One row per selected ORF, with coordinates, candidate count, ORF LCA and status. |
 | `selected_orfs.faa` | Only the ORFs submitted to DIAMOND. |
@@ -137,24 +142,81 @@ miss downstream discordance. Use `all` when broader contig evidence matters.
 | `input_contigs.fasta` | Normalized input used by Prodigal; header IDs match the summary. |
 | `run.log`, tool logs | Progress, commands and tool diagnostics. |
 | `run_manifest.json` | Version, arguments, exact commands, counts and mapping diagnostics; written after successful completion. |
+| `stage_cache.json` | Completed-stage signatures and output checksums, saved immediately after each successful stage to support automatic resume. |
 
-`closest_blast_hits` lists, for each matched ORF, organism names and source
-genome accessions obtained from the metadata. Multiple candidate genomes stay
-visible. Proper CSV quoting preserves commas in metadata and organism names.
+`closest_blast_hits` lists exactly one **actual top hit** for each selected ORF,
+not the ORF LCA or a list of every candidate genome. For example:
+
+```text
+1_1: Pseudomonas aeruginosa [WP_002553999.1; GCF_000233495.1; 99.50% identity]; 1_2: no hit
+```
+
+The best qualifying protein hit is selected by highest bitscore, then lowest
+E-value, highest identity, and protein accession in lexical order. All tie
+breaks are deterministic and do not depend on DIAMOND output order. A shared
+protein accession can belong to many source assemblies: the display uses the
+lexically first source with assembly metadata (or first source if none has
+metadata). **This is a representative source, not evidence for an exact source
+strain.** `top_hits.csv` includes its candidate-genome count and explicitly
+flags representative source selection. `matches.csv` retains the complete
+candidate matches, and `orf_taxonomy.csv` retains the conservative ORF LCA
+assignments used for contig inference.
+
+For `all`-ORF searches, only the summary display is capped at 30,000 UTF-16
+units, with an omission notice and `summary_orfs_listed`/`summary_orfs_omitted`
+counts. `top_hits.csv` still contains one row for every selected ORF, and all
+evidence still contributes to inference. Proper CSV quoting preserves commas.
 
 `GC-content` is a fraction (0–1) among A/C/G/T bases; ambiguous bases are
 excluded. `hits_per_kb` is the number of **searched ORFs with qualifying
 hits** per contig kb, not the density of every predicted gene. `cov` is
 `Unknown` because this prototype does not accept coverage inputs.
 `Average_AAI` retains the legacy label but reports the mean identity of each
-ORF's best protein match (averaged over equal-score ties), then the mean
-across matched ORFs. It is **not a genome-wide AAI estimate**.
+ORF's selected top protein match, then the mean across matched ORFs. It is
+**not a genome-wide AAI estimate**.
 
 `support_fraction = supporting_orfs / classified_orfs`;
 `classified_fraction = classified_orfs / selected_orfs`. Reports use empty
 taxid/rank fields and `predicted_taxon=unclassified` when no call is made.
 
 ## Reusing predictions and alignments
+
+### Automatic resume in the same output directory
+
+After updating the code, **rerun your original command with the same
+`--outdir`**. The log prints `Reusing completed Prodigal predictions` and
+`Reusing completed DIAMOND hits` when the completed stages are compatible.
+The reports, including the new one-hit-per-ORF summary, are regenerated.
+
+Completed V2 `2.0.0a1`/`2.0.0a2` runs are recognized using their successful
+`run_manifest.json`, normalized input, selected ORFs, alignment settings,
+database path, and file timestamps. They are adopted into the new cache
+without an alignment rerun when compatible. If those provenance files are
+missing, supply `--proteins` and `--diamond-results` explicitly as below.
+
+New runs save `stage_cache.json` immediately after each successful stage.
+Prodigal cache entries include the normalized-contig SHA-256, mode and genetic
+code. DIAMOND entries include the selected-protein SHA-256, database resolved
+path/size/modification time, alignment settings and output format. Completed
+output files are checked against their SHA-256 digests. A changed input,
+database identity, search setting or damaged output reruns the affected stage.
+Changing taxonomy/metadata inputs, inference thresholds or thread count reuses
+compatible alignments. Database identity uses file metadata to avoid hashing
+an entire large reference database on every run; use `--force-reblast` after
+replacing a database while deliberately preserving its path, size and timestamp.
+
+External tools write `.partial` files. These are promoted to completed output
+files and marked reusable only after successful exit and parsing. A partial
+or unmarked alignment is never automatically reused; a completed zero-hit
+alignment is reusable. Executables are required only for stages that actually
+need to run. `run_manifest.json` records whether each stage ran, was reused,
+was adopted from a previous version, or was explicitly provided.
+
+Use `--force-reblast` to rerun DIAMOND deliberately. A nonempty unrelated
+directory is rejected; an existing recognizable V2 output directory is
+accepted for resuming and refreshing reports.
+
+### Explicit reuse from another directory
 
 To revise inference without running external tools again, supply the full
 Prodigal protein output and the previous DIAMOND TSV with the same inputs:
@@ -190,10 +252,13 @@ python -m unittest discover -s tests -p 'test_v2*.py' -v
 ```
 
 The suite covers shared accessions, incomplete metadata, merged taxids, rank
-resolution, sampling and no-hit outputs. It also includes an optional real-tool
+resolution, sampling, actual single-top-hit selection, missing-hit rows,
+large candidate sets, resumable stages, legacy-run adoption, cache invalidation,
+failed/partial alignments and completed empty alignments. It also includes an optional real-tool
 test using the repository's toy contigs and a synthetic reference/metadata
-mapping. All 12 tests passed with Prodigal 2.6.3 and DIAMOND 2.2.9; the real-tool
-test runs both 25-ORF and all-ORF searches. This checks pipeline execution and
+mapping. All 19 tests passed with Prodigal 2.6.3 and DIAMOND 2.2.9; the real-tool
+test runs both 25-ORF and all-ORF searches and repeats each command to verify
+automatic reuse without changing either tool output. This checks pipeline execution and
 evidence accounting, not biological accuracy on independent reference data.
 
 Reference documentation: [DIAMOND command-line options](https://github.com/bbuchfink/diamond/wiki/3.-Command-line-options),
