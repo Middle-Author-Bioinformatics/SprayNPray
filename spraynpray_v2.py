@@ -8,6 +8,7 @@ input formats, output definitions and limitations.
 import argparse
 import csv
 import gzip
+import hashlib
 import json
 import logging
 import math
@@ -17,11 +18,12 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "2.0.0a1"
+VERSION = "2.0.0a3"
 LOG = logging.getLogger("spraynpray_v2")
 RANKS = ("domain", "phylum", "class", "order", "family", "genus", "species")
 HIT_FIELDS = ("qseqid", "sseqid", "pident", "length", "qstart", "qend",
@@ -379,6 +381,51 @@ def csv_writer(path, fields):
     return handle, writer
 
 
+def top_hit_record(orf, hits, mappings, assemblies):
+    """One actual protein hit and one explicitly representative source assembly."""
+    record = dict(orf=orf.name, contig=orf.contig, start=orf.start, end=orf.end,
+                  strand=orf.strand, taxa="no hit", top_hit="no hit",
+                  protein_accession="", source_genome_accession="",
+                  metadata_assembly_accession="", metadata_match="", pident="",
+                  evalue="", bitscore="", candidate_genomes=0,
+                  source_genome_is_representative=False, status="no_hit")
+    if not hits:
+        return record, {}
+    hit = min(hits, key=lambda h: (-h.bitscore, h.evalue, -h.identity, h.subject))
+    genomes = sorted(mappings.get(hit.subject, ()))
+    # A shared WP accession cannot identify its original source strain. Prefer
+    # a source with metadata, then accession order, solely for the display.
+    genome = min(genomes, key=lambda g: (g not in assemblies, g)) if genomes else ""
+    row, match = assemblies.get(genome, ({}, "missing"))
+    status = ("missing_protein_mapping" if not genome else
+              "missing_assembly_metadata" if not row else "matched")
+    record.update(taxa=row.get("organism_name", "unclassified"), top_hit=hit.subject,
+                  protein_accession=hit.subject, source_genome_accession=genome,
+                  metadata_assembly_accession=row.get("assembly_accession", ""),
+                  metadata_match=match, pident=hit.identity, evalue=hit.evalue,
+                  bitscore=hit.bitscore, candidate_genomes=len(genomes),
+                  source_genome_is_representative=len(genomes) > 1, status=status)
+    return record, row
+
+
+def compact_summary(entries):
+    """Keep whole top-hit entries below spreadsheet cell limits in all-ORF mode."""
+    reserve = "; ... (%s more ORFs; see top_hits.csv)" % len(entries)
+    budget = 30000 - len(reserve.encode("utf-16-le")) // 2
+    kept, used = [], 0
+    for entry in entries:
+        size = len(entry.encode("utf-16-le")) // 2 + (2 if kept else 0)
+        if used + size > budget:
+            break
+        kept.append(entry)
+        used += size
+    omitted = len(entries) - len(kept)
+    text = "; ".join(kept)
+    if omitted:
+        text += ("; " if text else "") + "... (%s more ORFs; see top_hits.csv)" % omitted
+    return text, len(kept), omitted
+
+
 def write_reports(outdir, contigs, orfs, hits, mappings, assemblies, metadata_fields, taxonomy, args):
     selected = [o for o in orfs.values() if o.selected]
     evidence, votes, by_contig = {}, defaultdict(list), defaultdict(list)
@@ -389,6 +436,19 @@ def write_reports(outdir, contigs, orfs, hits, mappings, assemblies, metadata_fi
         votes[orf.contig].append(taxid)
         by_contig[orf.contig].append(orf.name)
         diagnostics[status] += 1
+
+    top_hits = {}
+    top_fields = ["orf", "taxa", "top_hit", "contig", "start", "end", "strand",
+                  "protein_accession", "source_genome_accession", "metadata_assembly_accession",
+                  "metadata_match", "pident", "evalue", "bitscore", "candidate_genomes",
+                  "source_genome_is_representative", "status"]
+    handle, writer = csv_writer(outdir / "top_hits.csv", top_fields + ["assembly_" + f for f in metadata_fields])
+    with handle:
+        for contig in contigs:
+            for name in sorted(by_contig[contig], key=lambda n: (orfs[n].start, orfs[n].end, n)):
+                record, row = top_hit_record(orfs[name], hits.get(name, []), mappings, assemblies)
+                top_hits[name] = record
+                writer.writerow(dict(record, **{"assembly_" + f: row.get(f, "") for f in metadata_fields}))
 
     fields = ["orf", "taxa", "top_hit", "contig", "protein_accession", "source_genome_accession",
               "metadata_assembly_accession", "metadata_match", "mapping_status", "pident",
@@ -433,38 +493,41 @@ def write_reports(outdir, contigs, orfs, hits, mappings, assemblies, metadata_fi
     fields = ["contig", "contig_length", "hits_per_kb", "cov", "GC-content", "Average_AAI",
               "closest_blast_hits", "total_orfs", "selected_orfs", "orfs_with_hits",
               "classified_orfs", "classified_fraction", "predicted_taxid", "predicted_taxon",
-              "predicted_rank", "supporting_orfs", "support_fraction", "status"] + list(RANKS)
+              "predicted_rank", "supporting_orfs", "support_fraction", "status",
+              "summary_orfs_listed", "summary_orfs_omitted"] + list(RANKS)
     handle, writer = csv_writer(outdir / "contigs.csv", fields)
     totals = Counter(o.contig for o in orfs.values())
     with handle:
         for contig, info in contigs.items():
             names = by_contig[contig]
+            names.sort(key=lambda n: (orfs[n].start, orfs[n].end, n))
             matched = [n for n in names if hits.get(n)]
             taxid, support, status = infer_contig(votes[contig], len(names), taxonomy, args)
             identities = []
             descriptions = []
             for n in matched:
-                hs = hits[n]
-                best = max(h.bitscore for h in hs)
-                # Each ORF contributes one mean of its equally best protein hits.
-                identities.append(statistics.mean(h.identity for h in hs if h.bitscore == best))
-                candidates = set()
-                for h in hs:
-                    for g in mappings.get(h.subject, ()):
-                        row = assemblies.get(g, ({}, ""))[0]
-                        candidates.add("%s [%s]" % (row.get("organism_name", "unclassified"), g))
-                descriptions.append("%s: %s" % (n, " | ".join(sorted(candidates)) or "unmapped protein"))
+                identities.append(top_hits[n]["pident"])
+            for n in names:
+                hit = top_hits[n]
+                if hit["status"] == "no_hit":
+                    descriptions.append("%s: no hit" % n)
+                else:
+                    descriptions.append("%s: %s [%s; %s; %.2f%% identity]" % (
+                        n, hit["taxa"], hit["protein_accession"],
+                        hit["source_genome_accession"] or "unmapped", hit["pident"]))
+            summary, listed, omitted = compact_summary(descriptions)
             classified = sum(v is not None for v in votes[contig])
             record = dict(contig=contig, contig_length=info["length"],
                           hits_per_kb=1000 * len(matched) / info["length"], cov="Unknown",
                           **{"GC-content": info["gc"] if info["gc"] is not None else "NA"},
                           Average_AAI=statistics.mean(identities) if identities else "NA",
-                          closest_blast_hits="; ".join(descriptions), total_orfs=totals[contig],
+                          closest_blast_hits=summary, total_orfs=totals[contig],
                           selected_orfs=len(names), orfs_with_hits=len(matched),
                           classified_orfs=classified, classified_fraction=classified / len(names) if names else 0,
                           predicted_taxid=taxid or "", predicted_taxon=taxonomy.label(taxid),
                           predicted_rank=taxonomy.ranks.get(taxid, ""), supporting_orfs=support,
-                          support_fraction=support / classified if classified else 0, status=status)
+                          support_fraction=support / classified if classified else 0, status=status,
+                          summary_orfs_listed=listed, summary_orfs_omitted=omitted)
             record.update(taxonomy.ranked_lineage(taxid))
             writer.writerow(record)
             diagnostics["contigs_" + status] += 1
@@ -476,6 +539,174 @@ def run_command(command, log_path, commands):
     commands.append(command)
     with open(log_path, "w") as log:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_json(path):
+    try:
+        with open(path) as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_json_atomic(path, value):
+    temporary = path.with_name(path.name + ".tmp")
+    with open(temporary, "w") as handle:
+        json.dump(value, handle, indent=2)
+        handle.write("\n")
+    temporary.replace(path)
+
+
+def database_fingerprint(path):
+    path = Path(path)
+    if not path.is_file():
+        path = Path(str(path) + ".dmnd")
+    stat = path.stat()
+    return dict(path=str(path.resolve()), size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+
+
+def cached_stage(cache, stage, signature, output):
+    record = cache.get(stage, {})
+    return (isinstance(record, dict) and record.get("complete") is True
+            and record.get("signature") == signature and output.is_file()
+            and record.get("output_sha256") == file_sha256(output))
+
+
+def save_stage(cache_path, cache, stage, signature, output):
+    cache[stage] = dict(complete=True, signature=signature, output_sha256=file_sha256(output))
+    write_json_atomic(cache_path, cache)
+
+
+def legacy_settings_match(previous, args, fields):
+    old = previous.get("arguments", {})
+    return isinstance(old, dict) and all(k in old and old[k] == getattr(args, k) for k in fields)
+
+
+def legacy_file_valid(path, manifest_path):
+    return (path.is_file() and manifest_path.is_file()
+            and path.stat().st_mtime_ns <= manifest_path.stat().st_mtime_ns)
+
+
+def require_executable(executable):
+    if shutil.which(executable) is None:
+        raise ValueError("Executable not found on PATH: " + executable)
+
+
+ALIGNMENT_SETTINGS = ("evalue", "min_identity", "query_cover", "subject_cover", "top_percent", "sensitivity", "diamond")
+
+
+def run_predictions_and_alignment(args, contig_path, contig_digest, previous, commands):
+    """Resume verified stages, including completed a1/a2 runs, and return parsed hits."""
+    outdir = args.outdir
+    cache_path, manifest_path = outdir / "stage_cache.json", outdir / "run_manifest.json"
+    allow_legacy = not cache_path.exists() and previous.get("version") in ("2.0.0a1", "2.0.0a2")
+    cache, stages = read_json(cache_path), {}
+    old_contigs = outdir / "input_contigs.fasta"
+    legacy_contigs = (allow_legacy and legacy_file_valid(old_contigs, manifest_path)
+                      and file_sha256(old_contigs) == contig_digest)
+    contig_path.replace(old_contigs)
+    proteins = args.proteins or outdir / "prodigal.faa"
+    signature = dict(contigs_sha256=contig_digest, meta=args.meta,
+                     genetic_code=args.genetic_code, prodigal=args.prodigal)
+    if args.proteins is not None:
+        stages["prodigal"] = "provided"
+    else:
+        reuse = cached_stage(cache, "prodigal", signature, proteins)
+        legacy_reuse = (legacy_contigs and legacy_file_valid(proteins, manifest_path)
+                        and legacy_settings_match(previous, args, ("meta", "genetic_code", "prodigal")))
+        if reuse or legacy_reuse:
+            LOG.info("Reusing completed Prodigal predictions: %s", proteins)
+            stages["prodigal"] = "reused" if reuse else "legacy_reused"
+        else:
+            require_executable(args.prodigal)
+            partial = outdir / "prodigal.faa.partial"
+            partial_gff = outdir / "prodigal.gff.partial"
+            run_command([args.prodigal, "-i", str(old_contigs), "-a", str(partial),
+                         "-o", str(partial_gff), "-f", "gff", "-p",
+                         "meta" if args.meta else "single", "-g", str(args.genetic_code)],
+                        outdir / "prodigal.log", commands)
+            # Validate complete records before promoting the tool's output.
+            for _ in fasta(partial):
+                pass
+            partial.replace(proteins)
+            partial_gff.replace(outdir / "prodigal.gff")
+            stages["prodigal"] = "ran"
+        save_stage(cache_path, cache, "prodigal", signature, proteins)
+
+    selected_path = outdir / "selected_orfs.faa"
+    previous_selected = (file_sha256(selected_path) if legacy_contigs
+                         and legacy_file_valid(selected_path, manifest_path) else None)
+    # Use a distinct target even if --proteins points to selected_orfs.faa.
+    selected_temporary = outdir / "selected_orfs.faa.partial"
+    # The caller parsed contig lengths while normalizing the input.
+    contigs = {h.split()[0]: {"length": len(s)} for h, s in fasta(old_contigs)}
+    orfs = select_orfs(proteins, contigs, args.orfs_per_contig, selected_temporary)
+    selected_digest = file_sha256(selected_temporary)
+    selected_temporary.replace(selected_path)
+    n_selected = sum(o.selected for o in orfs.values())
+    LOG.info("Selected %s of %s ORFs across %s contigs", n_selected, len(orfs), len(contigs))
+    blast = args.diamond_results or outdir / "diamond.tsv"
+    if args.diamond_results is not None:
+        LOG.info("Using supplied DIAMOND hits: %s", blast)
+        stages["diamond"] = "provided"
+        return orfs, read_hits(blast, orfs, args), stages
+
+    signature = dict(selected_orfs_sha256=selected_digest,
+                     database=database_fingerprint(args.diamond_db),
+                     settings={k: getattr(args, k) for k in ALIGNMENT_SETTINGS},
+                     fields=list(HIT_FIELDS), max_hsps=1)
+    reuse = not args.force_reblast and cached_stage(cache, "diamond", signature, blast)
+    legacy_reuse = False
+    if (not args.force_reblast and legacy_contigs and previous_selected == selected_digest
+            and legacy_file_valid(blast, manifest_path)
+            and legacy_settings_match(previous, args, ALIGNMENT_SETTINGS)):
+        old_db = previous.get("arguments", {}).get("diamond_db")
+        if old_db:
+            try:
+                legacy_reuse = (database_fingerprint(old_db) == signature["database"]
+                                and signature["database"]["mtime_ns"] <= blast.stat().st_mtime_ns)
+            except OSError:
+                pass
+    if reuse or legacy_reuse:
+        try:
+            hits = read_hits(blast, orfs, args)
+        except ValueError as exc:
+            LOG.warning("Cached DIAMOND output is invalid (%s); rerunning alignment", exc)
+        else:
+            LOG.info("Reusing completed DIAMOND hits: %s", blast)
+            stages["diamond"] = "reused" if reuse else "legacy_reused"
+            save_stage(cache_path, cache, "diamond", signature, blast)
+            return orfs, hits, stages
+
+    partial = outdir / "diamond.tsv.partial"
+    if n_selected:
+        require_executable(args.diamond)
+        command = [args.diamond, "blastp", "--db", str(args.diamond_db),
+                   "--query", str(selected_path), "--out", str(partial),
+                   "--outfmt", "6"] + list(HIT_FIELDS) + [
+                       "--threads", str(args.threads), "--evalue", str(args.evalue),
+                       "--id", str(args.min_identity), "--query-cover", str(args.query_cover),
+                       "--subject-cover", str(args.subject_cover), "--top", str(args.top_percent),
+                       "--max-hsps", "1"]
+        if args.sensitivity != "default":
+            command.append("--" + args.sensitivity)
+        run_command(command, outdir / "diamond.log", commands)
+    else:
+        partial.write_text("")
+    hits = read_hits(partial, orfs, args)
+    partial.replace(blast)
+    save_stage(cache_path, cache, "diamond", signature, blast)
+    stages["diamond"] = "ran" if n_selected else "no_orfs"
+    return orfs, hits, stages
 
 
 def orf_limit(value):
@@ -498,7 +729,7 @@ def parser():
     p.add_argument("--protein-to-genome", type=Path, required=True, help="Two-column protein/genome TSV (optionally .gz)")
     p.add_argument("--assembly-info", type=Path, required=True, help="Original NCBI assembly summary TSV (optionally .gz)")
     p.add_argument("--taxdump", type=Path, required=True, help="Directory containing nodes.dmp and names.dmp")
-    p.add_argument("-o", "--outdir", type=Path, required=True, help="New or empty output directory")
+    p.add_argument("-o", "--outdir", type=Path, required=True, help="Output directory; automatically resumes completed stages")
     p.add_argument("--meta", action="store_true", help="Run Prodigal -p meta instead of single")
     p.add_argument("--orfs-per-contig", type=orf_limit, default=25, metavar="N|all", help="First N ORFs by genomic coordinate")
     p.add_argument("-t", "--threads", type=int, default=8, help="DIAMOND threads (Prodigal is single-threaded)")
@@ -517,10 +748,13 @@ def parser():
     p.add_argument("--diamond", default="diamond", help="DIAMOND executable")
     p.add_argument("--proteins", type=Path, help="Reuse Prodigal .faa with original IDs and coordinate headers")
     p.add_argument("--diamond-results", type=Path, help="Reuse 12-column DIAMOND TSV in the documented field order")
+    p.add_argument("--force-reblast", action="store_true", help="Rerun DIAMOND even when a completed compatible alignment exists")
     return p
 
 
 def validate(args, p):
+    if args.force_reblast and args.diamond_results is not None:
+        p.error("--force-reblast cannot be combined with --diamond-results")
     if args.threads < 1 or args.min_tax_orfs < 1 or args.genetic_code < 1:
         p.error("threads, min-tax-orfs, and genetic-code must be positive")
     for name in ("min_identity", "query_cover", "subject_cover", "top_percent"):
@@ -541,12 +775,12 @@ def validate(args, p):
             p.error("--diamond-db is required unless --diamond-results is supplied")
         if not args.diamond_db.is_file() and not Path(str(args.diamond_db) + ".dmnd").is_file():
             p.error("DIAMOND database not found: " + str(args.diamond_db))
-    for executable, needed in ((args.prodigal, args.proteins is None),
-                               (args.diamond, args.diamond_results is None)):
-        if needed and shutil.which(executable) is None:
-            p.error("Executable not found on PATH: " + executable)
-    if args.outdir.exists() and (not args.outdir.is_dir() or any(args.outdir.iterdir())):
-        p.error("Output directory must be new or empty; choose another --outdir")
+    if args.outdir.exists():
+        if not args.outdir.is_dir():
+            p.error("Output path is not a directory")
+        recognized = ("stage_cache.json", "run_manifest.json", "input_contigs.fasta", "prodigal.faa", "diamond.tsv")
+        if any(args.outdir.iterdir()) and not any((args.outdir / n).is_file() for n in recognized):
+            p.error("Nonempty output directory does not contain recognizable SprayNPray V2 run files")
 
 
 def main(argv=None):
@@ -559,34 +793,13 @@ def main(argv=None):
     commands = []
     try:
         LOG.info("SprayNPray V2 prototype %s", VERSION)
-        contig_path = args.outdir / "input_contigs.fasta"
-        contigs = prepare_contigs(args.contigs, contig_path)
-        proteins = args.proteins or args.outdir / "prodigal.faa"
-        if args.proteins is None:
-            run_command([args.prodigal, "-i", str(contig_path), "-a", str(proteins),
-                         "-o", str(args.outdir / "prodigal.gff"), "-f", "gff", "-p",
-                         "meta" if args.meta else "single", "-g", str(args.genetic_code)],
-                        args.outdir / "prodigal.log", commands)
-        selected_path = args.outdir / "selected_orfs.faa"
-        orfs = select_orfs(proteins, contigs, args.orfs_per_contig, selected_path)
+        previous = read_json(args.outdir / "run_manifest.json")
+        with tempfile.TemporaryDirectory(prefix=".spraynpray-", dir=args.outdir) as temp:
+            contig_path = Path(temp) / "normalized.fasta"
+            contigs = prepare_contigs(args.contigs, contig_path)
+            orfs, hits, stages = run_predictions_and_alignment(
+                args, contig_path, file_sha256(contig_path), previous, commands)
         n_selected = sum(o.selected for o in orfs.values())
-        LOG.info("Selected %s of %s ORFs across %s contigs", n_selected, len(orfs), len(contigs))
-        blast = args.diamond_results or args.outdir / "diamond.tsv"
-        if args.diamond_results is None:
-            if n_selected:
-                command = [args.diamond, "blastp", "--db", str(args.diamond_db),
-                           "--query", str(selected_path), "--out", str(blast),
-                           "--outfmt", "6"] + list(HIT_FIELDS) + [
-                               "--threads", str(args.threads), "--evalue", str(args.evalue),
-                               "--id", str(args.min_identity), "--query-cover", str(args.query_cover),
-                               "--subject-cover", str(args.subject_cover), "--top", str(args.top_percent),
-                               "--max-hsps", "1"]
-                if args.sensitivity != "default":
-                    command.append("--" + args.sensitivity)
-                run_command(command, args.outdir / "diamond.log", commands)
-            else:
-                blast.touch()
-        hits = read_hits(blast, orfs, args)
         wanted = {h.subject for hs in hits.values() for h in hs}
         LOG.info("Loading source genomes for %s matched protein accessions", len(wanted))
         mappings = load_protein_map(args.protein_to_genome, wanted)
@@ -598,14 +811,12 @@ def main(argv=None):
                                     metadata_fields, taxonomy, args)
         manifest = dict(version=VERSION, arguments={k: str(v.resolve()) if isinstance(v, Path) else v
                                                   for k, v in vars(args).items()},
-                        commands=commands, diagnostics=diagnostics, contigs=len(contigs),
+                        commands=commands, stages=stages, diagnostics=diagnostics, contigs=len(contigs),
                         total_orfs=len(orfs), selected_orfs=n_selected,
                         protein_accessions_with_hits=len(wanted),
                         unmapped_protein_accessions=len(wanted - set(mappings)),
                         missing_assembly_accessions=len(genomes - set(assemblies)))
-        with open(args.outdir / "run_manifest.json", "w") as out:
-            json.dump(manifest, out, indent=2)
-            out.write("\n")
+        write_json_atomic(args.outdir / "run_manifest.json", manifest)
         if wanted - set(mappings) or genomes - set(assemblies):
             LOG.warning("Some hits lack mappings/metadata. Inspect matches.csv and run_manifest.json")
         if not hits:
@@ -613,7 +824,7 @@ def main(argv=None):
         LOG.info("Finished: %s", args.outdir / "contigs.csv")
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         LOG.error("%s", exc)
-        LOG.error("Run failed. Inspect run.log and tool logs; use a new output directory when retrying.")
+        LOG.error("Run failed. Inspect run.log and tool logs; rerun the command to resume completed stages.")
         return 1
     return 0
 
