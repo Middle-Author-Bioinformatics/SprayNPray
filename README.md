@@ -4,6 +4,11 @@
 standalone `spraynpray_v2.py` pipeline with first-25-ORF sampling, source-genome
 metadata, and taxdump-based inference.
 
+**Cohort summaries and ANI maps:** [README_compare.md](README_compare.md)
+documents `spraynpray_compare.py`, which combines per-sample hit summaries,
+runs all-vs-all genome ANI including reference assemblies, and draws an
+interactive map with black samples and gray references.
+
 ## Rapid and simple taxonomic profiling of genome and metagenome contigs 
 #### - Bin validation
 #### - Metagenome profiling
