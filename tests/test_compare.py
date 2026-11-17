@@ -1,0 +1,278 @@
+"""Cohort summary, ANI evidence, missing-data and distance-map regression tests."""
+
+import csv
+import importlib.util
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("spraynpray_compare", ROOT / "spraynpray_compare.py")
+compare = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(compare)
+
+
+class CompareTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.results = self.base / "results"
+        self.results.mkdir()
+        self.out = self.base / "out"
+        self.out.mkdir()
+        self.work = self.out / "work"
+        self.work.mkdir()
+        self.args = SimpleNamespace(outdir=self.out, min_af=.5, min_ani=80, neighbors=2)
+
+    def summary(self, sample="sample_a", text=None, count=4):
+        path = self.results / (sample + ".csv")
+        if text is None:
+            text = ("c_1: Species, strain X [WP_1.1; GCF_000001.1; 100.00% identity]; "
+                    "c_2: Species, strain X [WP_2.1; GCF_000001.1; 98.00% identity]; "
+                    "c_3: Species Y [WP_3.1; GCA_000002.2; 95.00% identity]; c_4: no hit")
+        with path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["contig", "selected_orfs", "summary_orfs_omitted", "closest_blast_hits"])
+            writer.writeheader()
+            writer.writerow(dict(contig="c", selected_orfs=count, summary_orfs_omitted=0, closest_blast_hits=text))
+        return path
+
+    def nodes(self):
+        return [dict(id="a", kind="sample", staged_file="genomes/a.fa", source_file="/input/a.fa"),
+                dict(id="b", kind="sample", staged_file="genomes/b.fa", source_file="/input/b.fa"),
+                dict(id="GCF_000001.1", kind="reference", staged_file="genomes/r.fa", source_file="/refs/r.fa")]
+
+    def measurement(self, ani, af=.9):
+        return dict(ani=ani, mapped_fragments=int(af * 100), query_fragments=100, aligned_fraction=af)
+
+    def test_summary_counts_percentages_and_mean_are_per_orf(self):
+        master, overview, _ = compare.load_sample(self.summary())
+        self.assertEqual(overview["selected_orfs"], 4)
+        self.assertEqual(overview["matched_orfs"], 3)
+        self.assertEqual(overview["no_hit_orfs"], 1)
+        self.assertEqual(master[0]["orf_hits"], 2)
+        self.assertAlmostEqual(master[0]["hit_percent"], 200 / 3)
+        self.assertEqual(master[0]["selected_orf_percent"], 50)
+        self.assertEqual(master[0]["mean_protein_identity"], 99)
+        self.assertAlmostEqual(sum(r["hit_percent"] for r in master), 100)
+        self.assertEqual(master[0]["organism_names"], "Species, strain X")
+
+    def test_summary_folder_and_reference_subset_do_not_change_tallies(self):
+        self.summary()
+        self.summary("sample_b")
+        master, overview, refs = compare.summarize(self.results, self.out, top_references=1)
+        self.assertEqual(len(master), 4)
+        self.assertEqual(len(overview), 2)
+        self.assertEqual(refs, ["GCF_000001.1"])
+        with (self.out / "master_summary.csv").open() as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 4)
+
+    def test_top_hits_csv_unmapped_and_no_hit(self):
+        path = self.results / "sample_a.csv"
+        with path.open("w", newline="") as f:
+            fields = ["orf", "contig", "protein_accession", "source_genome_accession", "pident", "taxa", "status"]
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerow(dict(orf="a_1", contig="a", protein_accession="WP_1.1", source_genome_accession="", pident=99, taxa="", status="missing_protein_mapping"))
+            writer.writerow(dict(orf="a_2", contig="a", protein_accession="", source_genome_accession="", pident="", taxa="no hit", status="no_hit"))
+        master, overview, _ = compare.load_sample(path)
+        self.assertEqual(master[0]["reference_assembly"], "unmapped")
+        self.assertEqual(master[0]["hit_percent"], 100)
+        self.assertEqual(overview["unmapped_hit_orfs"], 1)
+
+    def test_truncated_malformed_duplicate_and_invalid_identity_rejected(self):
+        path = self.summary()
+        path.write_text(path.read_text().replace(",4,0,", ",4,2,"))
+        with self.assertRaisesRegex(ValueError, "Truncated"):
+            compare.load_sample(path)
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            list(compare.parse_summary_entries("a_1: Species [GCF_000001.1] | extra"))
+        with self.assertRaisesRegex(ValueError, "between 0 and 100"):
+            list(compare.parse_summary_entries("a_1: Species [WP_1.1; GCF_000001.1; 101.00% identity]"))
+        self.summary(text="c_1: no hit; c_1: no hit", count=2)
+        with self.assertRaisesRegex(ValueError, "Duplicate ORF"):
+            compare.load_sample(path)
+
+    def test_fastani_both_directions_coverage_and_missing_pairs(self):
+        nodes = self.nodes()
+        directional = {("a", "b"): self.measurement(99), ("b", "a"): self.measurement(98),
+                       ("a", "GCF_000001.1"): self.measurement(100, .1),
+                       ("GCF_000001.1", "a"): self.measurement(100, .9)}
+        edges = compare.pairwise_tables(nodes, directional, self.args)
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["ani_used"], 98.5)
+        self.assertEqual(edges[0]["distance"], 1.5)
+        with (self.out / "ani_pairs.csv").open() as f:
+            pairs = list(csv.DictReader(f))
+        self.assertEqual([r["status"] for r in pairs], ["accepted", "low_aligned_fraction", "not_reported"])
+        with (self.out / "ani_matrix.csv").open() as f:
+            matrix = list(csv.DictReader(f))
+        self.assertEqual(matrix[0]["GCF_000001.1"], "")
+        self.assertEqual(matrix[1]["a"], "98.5")
+        directional[("b", "GCF_000001.1")] = self.measurement(99)
+        compare.pairwise_tables(nodes, directional, self.args)
+        with (self.out / "ani_pairs.csv").open() as f:
+            self.assertEqual(list(csv.DictReader(f))[2]["status"], "missing_direction")
+
+    def test_fastani_parser_aliases_duplicate_validation(self):
+        raw = self.base / "ani.tsv"
+        raw.write_text("genomes/a.fa\tgenomes/b.fa\t99.5\t90\t100\n")
+        values = compare.parse_fastani(raw, self.nodes(), self.work)
+        self.assertEqual(values[("a", "b")]["aligned_fraction"], .9)
+        raw.write_text("genomes/a.fa\tgenomes/b.fa\t99.5\t101\t100\n")
+        with self.assertRaisesRegex(ValueError, "fragment"):
+            compare.parse_fastani(raw, self.nodes(), self.work)
+        raw.write_text("unknown\tb\t99\t90\t100\n")
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            compare.parse_fastani(raw, self.nodes(), self.work)
+
+    def test_fasta_staging_preserves_sequences_and_n50(self):
+        source = self.base / "a.fa"
+        source.write_text(">a\n" + "ACGT" * 100 + "\n>b\n" + "N" * 100 + "\n")
+        target = self.work / "a.fa"
+        stats = compare.stage_fasta(source, target)
+        self.assertEqual((stats["length_bp"], stats["contigs"], stats["n50"]), (500, 2, 400))
+        before = target.stat().st_mtime_ns
+        compare.stage_fasta(source, target)
+        self.assertEqual(before, target.stat().st_mtime_ns)
+        source.write_text(">a\nMPEPTIDE\n")
+        with self.assertRaisesRegex(ValueError, "Non-DNA"):
+            compare.stage_fasta(source, target)
+
+    def test_reference_zip_versions_and_path_safety(self):
+        archive = self.base / "reference.zip"
+        reference = "GCF_000001.1"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("ncbi_dataset/data/%s/%s_genomic.fna" % (reference, reference), ">a\nACGT\n")
+            z.writestr("ncbi_dataset/data/GCF_000001.2/GCF_000001.2_genomic.fna", ">wrong_version\nACGT\n")
+            z.writestr("../../escape.fa", ">bad\nACGT\n")
+        result = compare.extract_reference_package(archive, self.work, {reference})
+        self.assertEqual(list(result), [reference])
+        self.assertFalse((self.base.parent / "escape.fa").exists())
+
+    def test_ani_cache_reuse_and_invalidation(self):
+        nodes = self.nodes()
+        for i, node in enumerate(nodes):
+            node["sha256"] = str(i)
+        args = SimpleNamespace(frag_len=3000, fastani="fastANI", force_ani=False, fastani_results=None, threads=2)
+        count = []
+
+        def fake_command(command, log, cwd=None):
+            count.append(command)
+            (cwd / "fastani.tsv.partial").write_text("genomes/a.fa\tgenomes/b.fa\t99\t90\t100\n")
+
+        with patch.object(compare, "run_command", side_effect=fake_command), patch.object(shutil, "which", return_value="fastANI"):
+            self.assertEqual(compare.calculate_ani(nodes, args, self.work)[1], "ran")
+            args.threads = 4
+            self.assertEqual(compare.calculate_ani(nodes, args, self.work)[1], "reused")
+            self.assertEqual(len(count), 1)
+            nodes[0]["sha256"] = "changed"
+            self.assertEqual(compare.calculate_ani(nodes, args, self.work)[1], "ran")
+            (self.work / "fastani.tsv").write_text("damaged")
+            self.assertEqual(compare.calculate_ani(nodes, args, self.work)[1], "ran")
+            self.assertEqual(len(count), 3)
+
+    def test_reference_download_command_and_reuse(self):
+        args = SimpleNamespace(reference_dir=None, no_download=False, datasets="datasets",
+                               allow_missing_references=False, outdir=self.out)
+        calls = []
+
+        def fake_download(command, log, cwd=None):
+            calls.append(command)
+            requested = Path(command[command.index("--inputfile") + 1]).read_text().splitlines()
+            archive = Path(command[command.index("--filename") + 1])
+            with zipfile.ZipFile(archive, "w") as z:
+                for accession in requested:
+                    z.writestr("ncbi_dataset/data/%s/%s_genomic.fna" % (accession, accession), ">reference\nACGT\n")
+
+        with patch.object(compare, "run_command", side_effect=fake_download), patch.object(shutil, "which", return_value="datasets"):
+            resolved = compare.resolve_references(["GCF_000001.1", "GCA_000002.2"], args, self.work)
+            self.assertTrue(all(p.is_file() for p in resolved.values()))
+            compare.resolve_references(["GCF_000001.1", "GCA_000002.2"], args, self.work)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:4], ["datasets", "download", "genome", "accession"])
+        self.assertEqual(calls[0][calls[0].index("--include") + 1], "genome")
+        args.no_download = True
+        args.allow_missing_references = True
+        self.assertIsNone(compare.resolve_references(["GCF_000001.2"], args, self.work)["GCF_000001.2"])
+        self.assertTrue((self.out / "missing_references.csv").is_file())
+
+    def test_failed_fastani_does_not_create_a_completed_cache(self):
+        nodes = self.nodes()
+        for node in nodes:
+            node["sha256"] = node["id"]
+        args = SimpleNamespace(frag_len=3000, fastani="fastANI", force_ani=False, fastani_results=None, threads=2)
+
+        def fail(command, log, cwd=None):
+            (cwd / "fastani.tsv.partial").write_text("unfinished")
+            raise subprocess.CalledProcessError(1, command)
+
+        with patch.object(compare, "run_command", side_effect=fail), patch.object(shutil, "which", return_value="fastANI"):
+            with self.assertRaises(subprocess.CalledProcessError):
+                compare.calculate_ani(nodes, args, self.work)
+        self.assertFalse((self.work / "ani_cache.json").exists())
+        self.assertFalse((self.work / "fastani.tsv").exists())
+
+    def test_embedding_uses_true_distances_and_keeps_components_separate(self):
+        nodes = [dict(id=x, kind="sample") for x in ("a", "b", "c", "unlinked")]
+        # Exact triangle with side lengths 1, 2, 2.5 in ANI percentage points.
+        edges = [dict(genome_a="a", genome_b="b", distance=1), dict(genome_a="b", genome_b="c", distance=2),
+                 dict(genome_a="a", genome_b="c", distance=2.5)]
+        coords, diagnostics = compare.embed_network(nodes, edges)
+        for edge in edges:
+            a, b = coords[edge["genome_a"]], coords[edge["genome_b"]]
+            self.assertAlmostEqual(math.hypot(a["x"] - b["x"], a["y"] - b["y"]), edge["distance"], places=4)
+        self.assertNotEqual(coords["a"]["component"], coords["unlinked"]["component"])
+        self.assertLess(diagnostics[0]["normalized_stress"], 1e-4)
+        self.assertEqual(len(compare.display_edges(nodes, edges, 1)), 2)
+
+    @unittest.skipUnless(shutil.which("fastANI"), "requires real FastANI")
+    def test_real_fastani_and_offline_network(self):
+        # Large random bacterial-like DNA and a known closely related derivative.
+        import random
+        rng = random.Random(9)
+        sequence = "".join(rng.choices("ACGT", k=250000))
+        mutant = list(sequence)
+        for index in range(0, len(mutant), 100):
+            mutant[index] = "A" if mutant[index] != "A" else "C"
+        genomes = self.base / "genomes"
+        references = self.base / "references"
+        genomes.mkdir()
+        references.mkdir()
+        (genomes / "sample_a.fa").write_text(">a\n" + sequence + "\n")
+        (genomes / "sample_b.fa").write_text(">b\n" + "".join(mutant) + "\n")
+        (references / "GCF_000001.1.fna").write_text(">reference\n" + sequence + "\n")
+        text = "c_1: Test organism [WP_1.1; GCF_000001.1; 100.00% identity]"
+        self.summary("sample_a", text, 1)
+        self.summary("sample_b", text, 1)
+        command = [sys.executable, str(ROOT / "spraynpray_compare.py"), "--results", str(self.results),
+                   "--genomes", str(genomes), "--reference-dir", str(references), "--no-download",
+                   "--outdir", str(self.out), "--threads", "2"]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with (self.out / "ani_pairs.csv").open() as f:
+            pairs = list(csv.DictReader(f))
+        self.assertEqual(len(pairs), 3)
+        self.assertTrue(all(r["status"] == "accepted" for r in pairs))
+        self.assertTrue(all(98 < float(r["ani_used"]) <= 100 for r in pairs))
+        for name in ("ani_network.png", "ani_network.svg", "ani_network.html"):
+            self.assertGreater((self.out / name).stat().st_size, 1000)
+        self.assertNotIn("https://cdn", (self.out / "ani_network.html").read_text())
+        before = (self.work / "fastani.tsv").stat().st_mtime_ns
+        again = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(before, (self.work / "fastani.tsv").stat().st_mtime_ns)
+        self.assertEqual(json.loads((self.out / "run_manifest.json").read_text())["ani_stage"], "reused")
+
+
+if __name__ == "__main__":
+    unittest.main()
