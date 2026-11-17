@@ -21,7 +21,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-VERSION = "2.0.0a1"
+VERSION = "2.0.0a2"
+SUMMARY_MAX_CHARS = 30000
 LOG = logging.getLogger("spraynpray_v2")
 RANKS = ("domain", "phylum", "class", "order", "family", "genus", "species")
 HIT_FIELDS = ("qseqid", "sseqid", "pident", "length", "qstart", "qend",
@@ -379,15 +380,40 @@ def csv_writer(path, fields):
     return handle, writer
 
 
+def compact_summary(entries, max_chars=SUMMARY_MAX_CHARS, detail_file="orf_taxonomy.csv"):
+    """Bound the display field even for --orfs-per-contig all; never drop evidence.
+
+    Counts and inference always use the complete set. Only this display string
+    is capped. Count UTF-16 units conservatively for spreadsheet compatibility.
+    """
+    reserve = "; ... (%s more ORFs; see %s)" % (len(entries), detail_file)
+    budget = max_chars - len(reserve.encode("utf-16-le")) // 2
+    kept, used = [], 0
+    for entry in entries:
+        size = len(entry.encode("utf-16-le")) // 2 + (2 if kept else 0)
+        if used + size > budget:
+            break
+        kept.append(entry)
+        used += size
+    omitted = len(entries) - len(kept)
+    result = "; ".join(kept)
+    if omitted:
+        result += ("; " if result else "") + "... (%s more ORFs; see %s)" % (omitted, detail_file)
+    return result, len(kept), omitted
+
+
 def write_reports(outdir, contigs, orfs, hits, mappings, assemblies, metadata_fields, taxonomy, args):
     selected = [o for o in orfs.values() if o.selected]
     evidence, votes, by_contig = {}, defaultdict(list), defaultdict(list)
+    candidate_counts = {}
     diagnostics = Counter()
     for orf in selected:
         taxid, status = infer_orf(hits.get(orf.name, []), mappings, assemblies, taxonomy)
         evidence[orf.name] = taxid, status
         votes[orf.contig].append(taxid)
         by_contig[orf.contig].append(orf.name)
+        candidate_counts[orf.name] = len({g for h in hits.get(orf.name, [])
+                                          for g in mappings.get(h.subject, ())})
         diagnostics[status] += 1
 
     fields = ["orf", "taxa", "top_hit", "contig", "protein_accession", "source_genome_accession",
@@ -424,21 +450,22 @@ def write_reports(outdir, contigs, orfs, hits, mappings, assemblies, metadata_fi
     with handle:
         for orf in selected:
             taxid, status = evidence[orf.name]
-            genomes = set(g for h in hits.get(orf.name, []) for g in mappings.get(h.subject, ()))
             writer.writerow(dict(orf=orf.name, contig=orf.contig, start=orf.start, end=orf.end,
                                  strand=orf.strand, retained_protein_hits=len(hits.get(orf.name, [])),
-                                 candidate_genomes=len(genomes), taxid=taxid or "",
+                                 candidate_genomes=candidate_counts[orf.name], taxid=taxid or "",
                                  taxon=taxonomy.label(taxid), rank=taxonomy.ranks.get(taxid, ""), status=status))
 
     fields = ["contig", "contig_length", "hits_per_kb", "cov", "GC-content", "Average_AAI",
               "closest_blast_hits", "total_orfs", "selected_orfs", "orfs_with_hits",
               "classified_orfs", "classified_fraction", "predicted_taxid", "predicted_taxon",
-              "predicted_rank", "supporting_orfs", "support_fraction", "status"] + list(RANKS)
+              "predicted_rank", "supporting_orfs", "support_fraction", "status",
+              "summary_orfs_listed", "summary_orfs_omitted"] + list(RANKS)
     handle, writer = csv_writer(outdir / "contigs.csv", fields)
     totals = Counter(o.contig for o in orfs.values())
     with handle:
         for contig, info in contigs.items():
             names = by_contig[contig]
+            names.sort(key=lambda n: (orfs[n].start, orfs[n].end, n))
             matched = [n for n in names if hits.get(n)]
             taxid, support, status = infer_contig(votes[contig], len(names), taxonomy, args)
             identities = []
@@ -448,23 +475,26 @@ def write_reports(outdir, contigs, orfs, hits, mappings, assemblies, metadata_fi
                 best = max(h.bitscore for h in hs)
                 # Each ORF contributes one mean of its equally best protein hits.
                 identities.append(statistics.mean(h.identity for h in hs if h.bitscore == best))
-                candidates = set()
-                for h in hs:
-                    for g in mappings.get(h.subject, ()):
-                        row = assemblies.get(g, ({}, ""))[0]
-                        candidates.add("%s [%s]" % (row.get("organism_name", "unclassified"), g))
-                descriptions.append("%s: %s" % (n, " | ".join(sorted(candidates)) or "unmapped protein"))
+            for n in names:
+                orf_taxid, orf_status = evidence[n]
+                assignment = taxonomy.label(orf_taxid)
+                resolution = ("taxid %s; %s" % (orf_taxid, taxonomy.ranks[orf_taxid])
+                              if orf_taxid else orf_status)
+                descriptions.append("%s: %s [%s; %s candidate genomes]" % (
+                    n, assignment, resolution, candidate_counts[n]))
+            summary, listed, omitted = compact_summary(descriptions)
             classified = sum(v is not None for v in votes[contig])
             record = dict(contig=contig, contig_length=info["length"],
                           hits_per_kb=1000 * len(matched) / info["length"], cov="Unknown",
                           **{"GC-content": info["gc"] if info["gc"] is not None else "NA"},
                           Average_AAI=statistics.mean(identities) if identities else "NA",
-                          closest_blast_hits="; ".join(descriptions), total_orfs=totals[contig],
+                          closest_blast_hits=summary, total_orfs=totals[contig],
                           selected_orfs=len(names), orfs_with_hits=len(matched),
                           classified_orfs=classified, classified_fraction=classified / len(names) if names else 0,
                           predicted_taxid=taxid or "", predicted_taxon=taxonomy.label(taxid),
                           predicted_rank=taxonomy.ranks.get(taxid, ""), supporting_orfs=support,
-                          support_fraction=support / classified if classified else 0, status=status)
+                          support_fraction=support / classified if classified else 0, status=status,
+                          summary_orfs_listed=listed, summary_orfs_omitted=omitted)
             record.update(taxonomy.ranked_lineage(taxid))
             writer.writerow(record)
             diagnostics["contigs_" + status] += 1

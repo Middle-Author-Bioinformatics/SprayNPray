@@ -17,6 +17,9 @@ SPEC = importlib.util.spec_from_file_location("spraynpray_v2", ROOT / "spraynpra
 v2 = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = v2
 SPEC.loader.exec_module(v2)
+COMPACT_SPEC = importlib.util.spec_from_file_location("compact_contigs", ROOT / "compact_contigs.py")
+compact = importlib.util.module_from_spec(COMPACT_SPEC)
+COMPACT_SPEC.loader.exec_module(compact)
 
 
 class EvidenceTests(unittest.TestCase):
@@ -203,6 +206,83 @@ class EvidenceTests(unittest.TestCase):
         path.write_text(">a first\nACGT\n>a second\nACGT\n")
         with self.assertRaisesRegex(ValueError, "Duplicate contig"):
             v2.prepare_contigs(path, self.base / "normalized.fasta")
+
+    def test_summary_with_thousands_of_sources_is_compact_but_evidence_complete(self):
+        contigs, proteins, blast, _, metadata = self.fixture_inputs()
+        out = self.base / "reports"
+        out.mkdir()
+        info = v2.prepare_contigs(contigs, out / "input.fasta")
+        orfs = v2.select_orfs(proteins, info, 25, out / "selected.faa")
+        hits = v2.read_hits(blast, orfs, self.args)
+        genomes = {"GCF_%09d.1" % i for i in range(1000)}
+        assemblies = {g: ({"assembly_accession": g, "taxid": str(11 + i % 2),
+                           "organism_name": "Pseudomonas " + "long_name_" * 12}, "exact")
+                      for i, g in enumerate(sorted(genomes))}
+        v2.write_reports(out, info, orfs, hits, {"WP_1.1": genomes}, assemblies,
+                         ["assembly_accession", "taxid", "organism_name"], self.tax, self.args)
+        with (out / "contigs.csv").open() as f:
+            row = next(csv.DictReader(f))
+        summary = row["closest_blast_hits"]
+        self.assertLess(len(summary), 1000)
+        self.assertIn("1000 candidate genomes", summary)
+        self.assertIn("Pseudomonas [taxid 10; genus", summary)
+        self.assertNotIn("GCF_", summary)
+        self.assertEqual(row["predicted_taxid"], "10")
+        self.assertEqual(row["summary_orfs_listed"], "3")
+        self.assertEqual(row["summary_orfs_omitted"], "0")
+        with (out / "matches.csv").open() as f:
+            self.assertEqual(sum(1 for _ in csv.DictReader(f)), 3000)
+        with (out / "orf_taxonomy.csv").open() as f:
+            self.assertTrue(all(r["candidate_genomes"] == "1000" for r in csv.DictReader(f)))
+
+    def test_all_orf_display_is_bounded_without_miscounting(self):
+        entries = ["orf_%s: Pseudomonas alpha [taxid 11; species; 12345 candidate genomes]" % i
+                   for i in range(6000)]
+        summary, listed, omitted = v2.compact_summary(entries)
+        self.assertLessEqual(len(summary.encode("utf-16-le")) // 2, 30000)
+        self.assertGreater(omitted, 0)
+        self.assertEqual(listed + omitted, 6000)
+        self.assertIn("%s more ORFs" % omitted, summary)
+        self.assertIn("orf_taxonomy.csv", summary)
+        unicode_summary, _, _ = v2.compact_summary(["x" + "\U0001f600" * 120] * 1000)
+        self.assertLessEqual(len(unicode_summary.encode("utf-16-le")) // 2, 30000)
+
+    def test_legacy_compaction_preserves_predictions_and_uses_existing_orf_assignments(self):
+        source = self.base / "legacy.csv"
+        original = dict(contig="a", selected_orfs="1", predicted_taxid="10", status="classified",
+                        closest_blast_hits="a_1: Species, alpha [GCF_000001.1] | Species beta [GCF_000002.1]")
+        with source.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(original))
+            writer.writeheader()
+            writer.writerow(original)
+        output = self.base / "compact.csv"
+        self.assertEqual(compact.compact_file(source, output), 1)
+        with output.open() as f:
+            row = next(csv.DictReader(f))
+        self.assertIn("2 candidate genomes", row["closest_blast_hits"])
+        self.assertIn("2 organism labels", row["closest_blast_hits"])
+        self.assertEqual(row["predicted_taxid"], original["predicted_taxid"])
+        self.assertEqual(row["summary_basis"], "original_organism_labels_not_LCA")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            compact.compact_file(source, output)
+        with self.assertRaisesRegex(ValueError, "separate output"):
+            compact.compact_file(source, source)
+        orf_csv = self.base / "orf_taxonomy.csv"
+        orf = dict(contig="a", orf="a_1", start="1", end="300", taxid="10",
+                   taxon="Pseudomonas", rank="genus", status="classified", candidate_genomes="2")
+        with orf_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(orf))
+            writer.writeheader()
+            writer.writerow(orf)
+        output_with_orfs = self.base / "with_orfs.csv"
+        compact.compact_file(source, output_with_orfs, orf_csv)
+        with output_with_orfs.open() as f:
+            row = next(csv.DictReader(f))
+        self.assertIn("Pseudomonas [taxid 10; genus; 2 candidate genomes]", row["closest_blast_hits"])
+        self.assertEqual(row["summary_basis"], "existing_orf_taxonomy")
+        orf_csv.write_text(orf_csv.read_text().splitlines()[0] + "\n")
+        with self.assertRaisesRegex(ValueError, "selected ORF count"):
+            compact.compact_file(source, self.base / "mismatch.csv", orf_csv)
 
     @unittest.skipUnless(shutil.which("prodigal") and shutil.which("diamond"), "requires real Prodigal and DIAMOND")
     def test_real_prodigal_diamond_pipeline(self):

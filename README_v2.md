@@ -138,9 +138,25 @@ miss downstream discordance. Use `all` when broader contig evidence matters.
 | `run.log`, tool logs | Progress, commands and tool diagnostics. |
 | `run_manifest.json` | Version, arguments, exact commands, counts and mapping diagnostics; written after successful completion. |
 
-`closest_blast_hits` lists, for each matched ORF, organism names and source
-genome accessions obtained from the metadata. Multiple candidate genomes stay
-visible. Proper CSV quoting preserves commas in metadata and organism names.
+`closest_blast_hits` contains one compact entry per selected ORF: its inferred
+LCA name, taxid/rank (or an unresolved status), and the number of candidate
+source genomes. For example:
+
+```text
+contig_1: Pseudomonas [taxid 286; genus; 12024 candidate genomes]
+```
+
+The complete protein/source-genome matches and assembly metadata stay in
+`matches.csv`, while every selected ORF's assignment stays in
+`orf_taxonomy.csv`. Shared proteins are not expanded into huge genome lists
+inside summary cells. This display change does not change inference, sampling,
+support or identity calculations.
+
+For `--orfs-per-contig all`, the display field is capped conservatively at
+30,000 UTF-16 units, keeping whole ORF entries followed by an omission notice.
+`summary_orfs_listed` and `summary_orfs_omitted` give the display counts.
+All selected ORFs still contribute to inference and remain in the detailed
+reports. Proper CSV quoting preserves commas in labels and metadata.
 
 `GC-content` is a fraction (0–1) among A/C/G/T bases; ambiguous bases are
 excluded. `hits_per_kb` is the number of **searched ORFs with qualifying
@@ -155,6 +171,28 @@ across matched ORFs. It is **not a genome-wide AAI estimate**.
 taxid/rank fields and `predicted_taxon=unclassified` when no call is made.
 
 ## Reusing predictions and alignments
+
+### Compact an existing oversized summary
+
+After updating the repository, run this without repeating Prodigal or DIAMOND:
+
+```bash
+python compact_contigs.py \
+  --input /path/to/previous_results/contigs.csv \
+  --output /path/to/previous_results/contigs_compact.csv
+```
+
+The utility automatically uses `orf_taxonomy.csv` from the input directory
+when present. You can specify another path with `--orf-taxonomy`. It uses the
+existing ORF assignments and preserves every contig statistic and prediction.
+The original file is retained and existing output files are not overwritten.
+
+If only the old `contigs.csv` is available, the utility summarizes the original
+organism labels (up to three examples plus the label and genome counts). It
+does **not** infer an LCA from organism names. `summary_basis` distinguishes
+these label summaries from entries using existing ORF taxonomy.
+
+### Re-run inference from existing predictions and alignments
 
 To revise inference without running external tools again, supply the full
 Prodigal protein output and the previous DIAMOND TSV with the same inputs:
@@ -190,9 +228,10 @@ python -m unittest discover -s tests -p 'test_v2*.py' -v
 ```
 
 The suite covers shared accessions, incomplete metadata, merged taxids, rank
-resolution, sampling and no-hit outputs. It also includes an optional real-tool
+resolution, sampling, no-hit outputs, large source-genome lists, bounded
+all-ORF displays, and repair of old summaries. It also includes an optional real-tool
 test using the repository's toy contigs and a synthetic reference/metadata
-mapping. All 12 tests passed with Prodigal 2.6.3 and DIAMOND 2.2.9; the real-tool
+mapping. All 15 tests passed with Prodigal 2.6.3 and DIAMOND 2.2.9; the real-tool
 test runs both 25-ORF and all-ORF searches. This checks pipeline execution and
 evidence accounting, not biological accuracy on independent reference data.
 
