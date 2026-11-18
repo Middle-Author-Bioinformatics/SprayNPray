@@ -235,6 +235,91 @@ class CompareTests(unittest.TestCase):
         self.assertLess(diagnostics[0]["normalized_stress"], 1e-4)
         self.assertEqual(len(compare.display_edges(nodes, edges, 1)), 2)
 
+    def test_nearest_reference_uses_ani_handles_ties_and_missing_matches(self):
+        nodes = [dict(id=x, kind="sample") for x in ("a", "b")] + [dict(id=x, kind="reference") for x in ("r1", "r2", "r3")]
+        pairs = [dict(genome_a="a", genome_b="r1", ani_used=99, min_aligned_fraction=.9, status="accepted"),
+                 dict(genome_a="r2", genome_b="a", ani_used=100, min_aligned_fraction=.8, status="accepted"),
+                 dict(genome_a="a", genome_b="r3", ani_used=100, min_aligned_fraction=.9, status="accepted"),
+                 dict(genome_a="b", genome_b="r1", ani_used="", min_aligned_fraction=.1, status="low_aligned_fraction")]
+        nearest = compare.nearest_reference_summary(nodes, pairs, self.out)
+        self.assertEqual(nearest[0]["nearest_reference"], "r3")
+        self.assertEqual(nearest[0]["estimated_ani"], 100)
+        self.assertEqual(nearest[0]["ani_distance"], 0)
+        self.assertEqual(nearest[0]["tied_reference_count"], 2)
+        self.assertEqual(nearest[1]["estimated_ani"], "")
+        self.assertEqual(nearest[1]["status"], "no_accepted_reference")
+
+    def test_reference_label_boxes_do_not_overlap_or_move_genome_points(self):
+        nodes = [dict(id="r%03d" % i, kind="reference", organism="Pseudomonas aeruginosa very long strain name " * 2) for i in range(60)]
+        nodes += [dict(id="sample", kind="sample")]
+        points = {n["id"]: dict(x=1, y=1) for n in nodes}
+        points["sample"] = dict(x=2, y=1)
+        original = json.dumps(points, sort_keys=True)
+        xy, labels, width, height = compare.expanded_reference_layout(nodes, points)
+        self.assertEqual(original, json.dumps(points, sort_keys=True))
+        self.assertEqual(len(labels), 60)
+        self.assertGreater(width, 1200)
+        for side in (0, 1):
+            column = sorted((l for l in labels if l["side"] == side), key=lambda l: l["y"])
+            for a, b in zip(column, column[1:]):
+                self.assertGreaterEqual(b["y"], a["y"] + a["height"] + 7.99)
+            self.assertGreaterEqual(column[0]["y"], 39.99)
+            self.assertLessEqual(column[-1]["y"] + column[-1]["height"], height - 39.99)
+        self.assertEqual(xy["r000"], xy["r059"])
+        self.assertGreater(xy["sample"][0], xy["r000"][0])
+
+    def test_sample_scope_skips_reference_only_pairs_and_reuses_full_cache(self):
+        nodes = self.nodes() + [dict(id="r2", kind="reference", staged_file="genomes/r2.fa", source_file="/refs/r2.fa")]
+        for node in nodes:
+            node["sha256"] = node["id"]
+        args = SimpleNamespace(frag_len=3000, fastani="fastANI", force_ani=False, fastani_results=None, threads=2, ani_scope="samples")
+        calls = []
+
+        def fake(command, log, cwd=None):
+            queries = (cwd / command[command.index("--ql") + 1]).read_text().splitlines()
+            targets = (cwd / command[command.index("--rl") + 1]).read_text().splitlines()
+            calls.append((queries, targets))
+            (cwd / command[command.index("-o") + 1]).write_text("".join(
+                "%s\t%s\t99\t90\t100\n" % (q, r) for q in queries for r in targets))
+
+        with patch.object(compare, "run_command", side_effect=fake), patch.object(shutil, "which", return_value="fastANI"):
+            values, stage = compare.calculate_ani(nodes, args, self.work)
+            self.assertEqual(stage, "ran")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(sum(len(q) * len(r) for q, r in calls), 12)  # 2^2 + 2*2*2; full union = 16
+            self.assertNotIn(("GCF_000001.1", "r2"), values)
+            self.assertIn(("a", "r2"), values)
+            self.assertIn(("r2", "a"), values)
+            self.assertEqual(compare.calculate_ani(nodes, args, self.work)[1], "reused")
+            self.assertEqual(len(calls), 2)
+            (self.work / "fastani.tsv").unlink()
+            compare.calculate_ani(nodes, args, self.work)  # completed directional jobs reassemble without tool calls
+            self.assertEqual(len(calls), 2)
+            args.ani_scope = "all"
+            compare.calculate_ani(nodes, args, self.work)
+            self.assertEqual(len(calls), 3)
+            args.ani_scope = "samples"
+            self.assertEqual(compare.calculate_ani(nodes, args, self.work)[1], "reused")
+            self.assertEqual(len(calls), 3)
+        graph_args = SimpleNamespace(outdir=self.out, min_af=.5, min_ani=80, ani_scope="samples")
+        compare.pairwise_tables(nodes, values, graph_args)
+        with (self.out / "ani_pairs.csv").open() as f:
+            rows = list(csv.DictReader(f))
+        self.assertFalse(any(r["kind_a"] == r["kind_b"] == "reference" for r in rows))
+
+    def test_old_all_scope_cache_is_reused_by_new_default(self):
+        nodes = self.nodes()
+        for node in nodes:
+            node["sha256"] = node["id"]
+        signature = dict(genomes=[dict(id=n["id"], sha256=n["sha256"]) for n in nodes],
+                         fragment_length=3000, min_fraction=.2, executable="fastANI")
+        raw = self.work / "fastani.tsv"
+        raw.write_text("genomes/a.fa\tgenomes/b.fa\t99\t90\t100\n")
+        compare.write_json(self.work / "ani_cache.json", dict(signature=signature, output_sha256=compare.sha256(raw)))
+        args = SimpleNamespace(frag_len=3000, fastani="fastANI", force_ani=False, fastani_results=None, threads=2, ani_scope="samples")
+        with patch.object(compare, "run_command", side_effect=AssertionError("must reuse")):
+            self.assertEqual(compare.calculate_ani(nodes, args, self.work)[1], "reused")
+
     @unittest.skipUnless(shutil.which("fastANI"), "requires real FastANI")
     def test_real_fastani_and_offline_network(self):
         # Large random bacterial-like DNA and a known closely related derivative.
@@ -272,6 +357,23 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(before, (self.work / "fastani.tsv").stat().st_mtime_ns)
         self.assertEqual(json.loads((self.out / "run_manifest.json").read_text())["ani_stage"], "reused")
+        pairs_before = compare.sha256(self.out / "ani_pairs.csv")
+        with (self.out / "network_nodes.csv").open() as f:
+            positions_before = [(r["id"], float(r["x"]), float(r["y"])) for r in csv.DictReader(f)]
+        helper = subprocess.run([sys.executable, str(ROOT / "spraynpray_helper.py"), "--analysis-dir", str(self.out)], capture_output=True, text=True)
+        self.assertEqual(helper.returncode, 0, helper.stderr)
+        self.assertEqual(pairs_before, compare.sha256(self.out / "ani_pairs.csv"))
+        self.assertEqual(before, (self.work / "fastani.tsv").stat().st_mtime_ns)
+        with (self.out / "network_nodes.csv").open() as f:
+            positions_after = [(r["id"], float(r["x"]), float(r["y"])) for r in csv.DictReader(f)]
+        self.assertEqual(positions_before, positions_after)
+        with (self.out / "nearest_references.csv").open() as f:
+            nearest = list(csv.DictReader(f))
+        self.assertEqual(len(nearest), 2)
+        self.assertTrue(all(r["nearest_reference"] == "GCF_000001.1" for r in nearest))
+        page = (self.out / "ani_network.html").read_text()
+        self.assertIn('id="references" type="checkbox" checked', page)
+        self.assertIn('stroke-dasharray="3 3"', page)
 
 
 if __name__ == "__main__":

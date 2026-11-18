@@ -22,11 +22,12 @@ import shutil
 import statistics
 import subprocess
 import sys
+import textwrap
 import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 LOG = logging.getLogger("spraynpray_compare")
 ACCESSION = re.compile(r"GC[AF]_\d+\.\d+")
 ENTRY = re.compile(
@@ -392,18 +393,63 @@ def parse_fastani(path, nodes, work):
 
 
 def calculate_ani(nodes, args, work):
-    signature = dict(genomes=[dict(id=n["id"], sha256=n["sha256"]) for n in nodes if n["staged_file"]],
-                     fragment_length=args.frag_len, min_fraction=0.2, executable=args.fastani)
+    scope = getattr(args, "ani_scope", "all")
+    base_signature = dict(genomes=[dict(id=n["id"], sha256=n["sha256"]) for n in nodes if n["staged_file"]],
+                          fragment_length=args.frag_len, min_fraction=0.2, executable=args.fastani)
+    signature = dict(base_signature, scope=scope)
     raw_path, cache_path = work / "fastani.tsv", work / "ani_cache.json"
     cache = read_json(cache_path)
     if args.fastani_results:
         return parse_fastani(args.fastani_results, nodes, work), "provided"
-    if (not args.force_ani and cache.get("signature") == signature and raw_path.is_file()
+    compatible = [signature, dict(base_signature, scope="all"), base_signature] if scope == "samples" else [signature, base_signature]
+    if (not args.force_ani and cache.get("signature") in compatible and raw_path.is_file()
             and cache.get("output_sha256") == sha256(raw_path)):
-        LOG.info("Reusing completed all-vs-all ANI results")
+        LOG.info("Reusing completed ANI results (including compatible older all-vs-all runs)")
         return parse_fastani(raw_path, nodes, work), "reused"
     if shutil.which(args.fastani) is None:
         raise ValueError("FastANI executable not found: " + args.fastani)
+    available = [n for n in nodes if n["staged_file"]]
+    if scope == "samples":
+        samples = [n for n in available if n["kind"] == "sample"]
+        references = [n for n in available if n["kind"] == "reference"]
+        requested = len(samples) * len(available) + len(references) * len(samples)
+        LOG.info("Requesting %s directional comparisons instead of %s full-union comparisons", requested, len(available) ** 2)
+        jobs = [("samples", samples, available)]
+        if references:
+            jobs.append(("references", references, samples))
+        outputs = []
+        for name, queries, targets in jobs:
+            job_signature = dict(base_signature, queries=[n["id"] for n in queries], references=[n["id"] for n in targets])
+            job_output = work / ("fastani_%s.tsv" % name)
+            job_cache_path = work / ("fastani_%s_cache.json" % name)
+            job_cache = read_json(job_cache_path)
+            if (not args.force_ani and job_cache.get("signature") == job_signature and job_output.is_file()
+                    and job_cache.get("output_sha256") == sha256(job_output)):
+                LOG.info("Reusing completed ANI job: %s", name)
+                parse_fastani(job_output, nodes, work)
+            else:
+                qlist, rlist = work / (name + "_queries.txt"), work / (name + "_references.txt")
+                qlist.write_text("\n".join(n["staged_file"] for n in queries) + "\n")
+                rlist.write_text("\n".join(n["staged_file"] for n in targets) + "\n")
+                partial = work / (job_output.name + ".partial")
+                partial.unlink(missing_ok=True)
+                run_command([args.fastani, "--ql", qlist.name, "--rl", rlist.name, "-o", partial.name,
+                             "-t", args.threads, "--fragLen", args.frag_len, "--minFraction", "0.2"],
+                            work / ("fastani_%s.log" % name), cwd=work)
+                parse_fastani(partial, nodes, work)
+                partial.replace(job_output)
+                write_json(job_cache_path, dict(signature=job_signature, output_sha256=sha256(job_output)))
+            outputs.append(job_output)
+        combined = work / "fastani.tsv.partial"
+        with open(combined, "wb") as destination:
+            for output in outputs:
+                with open(output, "rb") as source:
+                    shutil.copyfileobj(source, destination)
+                destination.write(b"\n")
+        values = parse_fastani(combined, nodes, work)
+        combined.replace(raw_path)
+        write_json(cache_path, dict(signature=signature, output_sha256=sha256(raw_path)))
+        return values, "ran"
     list_path = work / "genomes.txt"
     list_path.write_text("\n".join(n["staged_file"] for n in nodes if n["staged_file"]) + "\n")
     partial = work / "fastani.tsv.partial"
@@ -423,6 +469,8 @@ PAIR_FIELDS = ["genome_a", "genome_b", "kind_a", "kind_b", "ani_a_to_b", "ani_b_
 def pairwise_tables(nodes, directional, args):
     pairs, edges = [], []
     for a, b in itertools.combinations(nodes, 2):
+        if getattr(args, "ani_scope", "all") == "samples" and a["kind"] == b["kind"] == "reference":
+            continue
         forward, reverse = directional.get((a["id"], b["id"])), directional.get((b["id"], a["id"]))
         values = [v["ani"] for v in (forward, reverse) if v]
         mean = statistics.mean(values) if values else ""
@@ -457,6 +505,37 @@ def pairwise_tables(nodes, directional, args):
     write_csv(args.outdir / "ani_matrix.csv", fields, matrix)
     write_csv(args.outdir / "aligned_fraction_matrix.csv", fields, af_matrix)
     return edges
+
+
+def nearest_reference_summary(nodes, pairs, outdir):
+    """Rank accepted genome ANI, never approximate 2D display distances."""
+    kinds = {n["id"]: n["kind"] for n in nodes}
+    candidates = defaultdict(list)
+    for pair in pairs:
+        if pair["status"] != "accepted":
+            continue
+        a, b = pair["genome_a"], pair["genome_b"]
+        if {kinds.get(a), kinds.get(b)} != {"sample", "reference"}:
+            continue
+        sample, reference = (a, b) if kinds[a] == "sample" else (b, a)
+        candidates[sample].append((identity(pair["ani_used"]), float(pair["min_aligned_fraction"]), reference))
+    result = []
+    for node in nodes:
+        if node["kind"] != "sample":
+            continue
+        matches = sorted(candidates[node["id"]], key=lambda item: (-item[0], -item[1], item[2]))
+        if matches:
+            ani, fraction, reference = matches[0]
+            ties = sum(abs(value[0] - ani) <= 1e-6 for value in matches)
+            result.append(dict(sample=node["id"], nearest_reference=reference, estimated_ani=round(ani, 5),
+                               ani_distance=round(max(0.0, 100 - ani), 5), min_aligned_fraction=round(fraction, 6),
+                               tied_reference_count=ties, status="matched"))
+        else:
+            result.append(dict(sample=node["id"], nearest_reference="", estimated_ani="", ani_distance="",
+                               min_aligned_fraction="", tied_reference_count=0, status="no_accepted_reference"))
+    write_csv(outdir / "nearest_references.csv", ["sample", "nearest_reference", "estimated_ani", "ani_distance",
+              "min_aligned_fraction", "tied_reference_count", "status"], result)
+    return result
 
 
 def connected_components(ids, edges):
@@ -573,6 +652,48 @@ def display_edges(nodes, edges, neighbors):
     return [edges[index] for index in sorted(selected)]
 
 
+def expanded_reference_layout(nodes, positions):
+    """Put full reference labels in two nonoverlapping outer columns.
+
+    Only labels move. The same isotropic transform is applied to all points,
+    so spreading labels cannot change genome distances or measured ANI.
+    """
+    references = sorted((n for n in nodes if n["kind"] == "reference"),
+                        key=lambda n: (positions[n["id"]]["x"], n["id"]))
+    middle = (len(references) + 1) // 2
+    groups = [references[:middle], references[middle:]]
+    lines = {n["id"]: [n["id"]] + textwrap.wrap(n.get("organism", ""), width=44,
+              break_long_words=True, break_on_hyphens=False) for n in references}
+    heights = {key: max(18, 14 * len(value)) for key, value in lines.items()}
+    column_width = max([270] + [max(map(len, value)) * 6.5 + 30 for value in lines.values()])
+    width = 1080 + 2 * column_width + 120
+    height = max([800] + [80 + sum(heights[n["id"]] + 8 for n in group) for group in groups])
+    xs = [positions[n["id"]]["x"] for n in nodes]
+    ys = [positions[n["id"]]["y"] for n in nodes]
+    scale = min(1080 / max(max(xs) - min(xs), .1), (height - 120) / max(max(ys) - min(ys), .1))
+    xy = {n["id"]: (column_width + 60 + (positions[n["id"]]["x"] - min(xs)) * scale,
+                     60 + (max(ys) - positions[n["id"]]["y"]) * scale) for n in nodes}
+    labels = []
+    for side, group in enumerate(groups):
+        group = sorted(group, key=lambda n: (xy[n["id"]][1], n["id"]))
+        tops = []
+        for i, node in enumerate(group):
+            name = node["id"]
+            top = max(40, min(xy[name][1] - heights[name] / 2, height - heights[name] - 40))
+            if tops:
+                previous = group[i - 1]["id"]
+                top = max(top, tops[-1] + heights[previous] + 8)
+            tops.append(top)
+        if group:
+            tops[-1] = min(tops[-1], height - heights[group[-1]["id"]] - 40)
+            for i in range(len(tops) - 2, -1, -1):
+                tops[i] = min(tops[i], tops[i + 1] - heights[group[i]["id"]] - 8)
+        for node, top in zip(group, tops):
+            labels.append(dict(id=node["id"], x=20 if side == 0 else column_width + 1160,
+                               y=top, height=heights[node["id"]], lines=lines[node["id"]], side=side))
+    return xy, labels, width, height
+
+
 def draw_network(nodes, edges, positions, diagnostics, args):
     import matplotlib
     matplotlib.use("Agg")
@@ -582,7 +703,7 @@ def draw_network(nodes, edges, positions, diagnostics, args):
     for node in nodes:
         node.update(positions[node["id"]])
     write_csv(args.outdir / "network_nodes.csv", ["id", "kind", "organism", "source_file", "sequence_status",
-              "length_bp", "contigs", "n50", "component", "x", "y"], nodes)
+              "length_bp", "contigs", "n50", "orf_hits", "component", "x", "y"], nodes)
     write_csv(args.outdir / "network_edges.csv", PAIR_FIELDS + ["distance"], shown)
     write_csv(args.outdir / "layout_diagnostics.csv", list(diagnostics[0]), diagnostics)
     span_x = max(n["x"] for n in nodes) - min(n["x"] for n in nodes)
@@ -608,11 +729,9 @@ def draw_network(nodes, edges, positions, diagnostics, args):
     figure.savefig(args.outdir / "ani_network.png", dpi=200, bbox_inches="tight")
     plt.close(figure)
 
-    xs, ys = [n["x"] for n in nodes], [n["y"] for n in nodes]
-    span_x, span_y = max(max(xs) - min(xs), .1), max(max(ys) - min(ys), .1)
-    scale = min(1080 / span_x, 650 / span_y)
-    xy = {n["id"]: (60 + (n["x"] - min(xs)) * scale, 60 + (max(ys) - n["y"]) * scale) for n in nodes}
-    parts = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" role="img" aria-label="Genome ANI map"><rect width="1200" height="800" fill="white" pointer-events="none"/><g id="drawing">']
+    xy, labels, canvas_width, canvas_height = expanded_reference_layout(nodes, positions)
+    parts = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %.3f %.3f" role="img" aria-label="Genome ANI map"><rect width="%.3f" height="%.3f" fill="white" pointer-events="none"/><g id="drawing">' %
+             (canvas_width, canvas_height, canvas_width, canvas_height)]
     for edge in shown:
         x1, y1 = xy[edge["genome_a"]]
         x2, y2 = xy[edge["genome_b"]]
@@ -620,35 +739,93 @@ def draw_network(nodes, edges, positions, diagnostics, args):
             edge["genome_a"], edge["genome_b"], edge["ani_used"], edge["aligned_fraction_a_to_b"], edge["aligned_fraction_b_to_a"])
         parts.append('<line x1="%.3f" y1="%.3f" x2="%.3f" y2="%.3f" stroke="#bfc6cc" stroke-width="1" pointer-events="stroke"><title>%s</title></line>' %
                      (x1, y1, x2, y2, html.escape(title)))
+    for label in labels:
+        x, y = xy[label["id"]]
+        end_x = (label["x"] + max(map(len, label["lines"])) * 6.5 + 8 if label["side"] == 0 else label["x"] - 8)
+        parts.append('<g class="reference-label" pointer-events="none"><line x1="%.3f" y1="%.3f" x2="%.3f" y2="%.3f" stroke="#9fa7ae" stroke-width=".7" stroke-dasharray="3 3"/>' %
+                     (x, y, end_x, label["y"] + 8))
+        parts.append('<text x="%.3f" y="%.3f" font-size="11" fill="#434b53">' % (label["x"], label["y"] + 11))
+        for i, line in enumerate(label["lines"]):
+            parts.append('<tspan x="%.3f" dy="%s">%s</tspan>' % (label["x"], "0" if i == 0 else "14", html.escape(line)))
+        parts.append('</text></g>')
     for node in sorted(nodes, key=lambda n: n["kind"] == "sample"):
         x, y = xy[node["id"]]
         color = "#111111" if node["kind"] == "sample" else "#b0b0b0"
         detail = "%s (%s)\n%s\nSequence: %s\nComponent: %s" % (
             node["id"], node["kind"], node["organism"], node["sequence_status"], node["component"])
         if node["kind"] == "reference":
-            detail += "\nSprayNPray protein-hit count: %s (representative assembly labels)" % node["orf_hits"]
+            detail += "\nSprayNPray protein-hit count: %s (representative assembly labels)" % node.get("orf_hits", "")
         parts.append('<circle data-id="%s" data-info="%s" cx="%.3f" cy="%.3f" r="%s" fill="%s" stroke="white" stroke-width="1"><title>%s</title></circle>' % (
             html.escape(node["id"], quote=True), html.escape(detail, quote=True), x, y,
             4 if node["kind"] == "sample" else 6, color, html.escape(detail)))
-        parts.append('<text class="%s-label" x="%.3f" y="%.3f" font-size="10" fill="#333" %s>%s</text>' % (
-            node["kind"], x + 6, y - 5, 'display="none"' if node["kind"] == "reference" else "", html.escape(node["id"])))
+        if node["kind"] == "sample":
+            parts.append('<text class="sample-label" x="%.3f" y="%.3f" font-size="10" fill="#333">%s</text>' % (
+                x + 6, y - 5, html.escape(node["id"])))
     parts.append("</g></svg>")
     svg = "".join(parts)
     (args.outdir / "ani_network.svg").write_text(svg)
     options = '<option value="">Find a genome…</option>' + "".join(
         '<option value="%s">%s (%s)</option>' % (html.escape(n["id"], quote=True), html.escape(n["id"]), n["kind"]) for n in nodes)
     page = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Genome ANI map</title><style>body{font:15px system-ui;margin:28px;color:#20242a;background:#fafafa}h1{font-size:28px;font-weight:600;margin-bottom:8px}p{max-width:1050px;line-height:1.5}.controls{display:flex;gap:18px;align-items:center;flex-wrap:wrap}select,button{padding:8px;border:1px solid #ccd1d6;border-radius:5px;background:white}svg{width:100%;height:72vh;background:white;border:1px solid #e3e6e8;margin-top:16px;touch-action:none}text{pointer-events:none}#info{white-space:pre-line;min-height:55px;font-size:13px;margin-top:12px;color:#445}</style>
+<title>Genome ANI map</title><style>body{font:15px system-ui;margin:28px;color:#20242a;background:#fafafa}h1{font-size:28px;font-weight:600;margin-bottom:8px}p{max-width:1050px;line-height:1.5}.controls{display:flex;gap:18px;align-items:center;flex-wrap:wrap}select,button{padding:8px;border:1px solid #ccd1d6;border-radius:5px;background:white}.map-scroll{max-height:75vh;overflow:auto;margin-top:16px;border:1px solid #e3e6e8;background:white}svg{width:100%;min-width:1200px;height:auto;background:white;touch-action:none}text{pointer-events:none}#info{white-space:pre-line;min-height:55px;font-size:13px;margin-top:12px;color:#445}</style>
 <h1>Genome ANI map</h1><p>Black dots: your samples. Gray dots: SprayNPray reference assemblies. Shorter distances approximate higher genome ANI <strong>within each connected component</strong>. Hover lines for exact ANI and aligned fractions. Scroll to zoom and drag to pan.</p>
-<div class="controls"><select id="find">OPTIONS</select><label><input id="samples" type="checkbox" checked>Sample labels</label><label><input id="references" type="checkbox">Reference labels</label><button id="reset">Reset view</button></div>SVG<div id="info"></div>
+<div class="controls"><select id="find">__OPTIONS__</select><label><input id="samples" type="checkbox" checked>Sample labels</label><label><input id="references" type="checkbox" checked>Reference labels</label><button id="reset">Reset view</button></div><div class="map-scroll">__SVG__</div><div id="info"></div>
+<p>Reference names are spread into outer columns with dashed leader lines; genome dots and ANI distances are unchanged. Dashed leaders identify labels and do not represent ANI.</p>
 <p>Distances target <code>100 − mean reciprocal ANI</code>; 2D geometry is an approximation, not a phylogenetic tree. Separate components are placed side by side for display: their gaps are arbitrary. Missing or low-coverage ANI comparisons create no distance constraints. Only pairs with both directions and aligned fractions ≥ MINAF are used. Displayed lines use NEIGHBORS nearest neighbors per node plus a minimum spanning forest (0 means all); all accepted pairs inform the layout. Identical genomes can overlap. Protein-hit percentages indicate representative assembly labels, not strain abundance.</p>
-<script>const svg=document.querySelector('svg'),drawing=document.getElementById('drawing');let box=[0,0,1200,800],drag=null;
-function view(){svg.setAttribute('viewBox',box.join(' '))}svg.addEventListener('wheel',e=>{e.preventDefault();const r=svg.getBoundingClientRect(),u=(e.clientX-r.left)/r.width,v=(e.clientY-r.top)/r.height,k=e.deltaY>0?1.15:1/1.15;box=[box[0]+u*box[2]*(1-k),box[1]+v*box[3]*(1-k),box[2]*k,box[3]*k];view()},{passive:false});
-svg.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY,box.slice()];svg.setPointerCapture(e.pointerId)});svg.addEventListener('pointermove',e=>{if(!drag)return;const r=svg.getBoundingClientRect();box=[drag[2][0]-(e.clientX-drag[0])*drag[2][2]/r.width,drag[2][1]-(e.clientY-drag[1])*drag[2][3]/r.height,drag[2][2],drag[2][3]];view()});svg.addEventListener('pointerup',()=>drag=null);
-document.getElementById('reset').onclick=()=>{box=[0,0,1200,800];view()};for(const [control,kind] of [['samples','sample'],['references','reference']])document.getElementById(control).onchange=e=>document.querySelectorAll('.'+kind+'-label').forEach(t=>t.setAttribute('display',e.target.checked?'':'none'));
+<script>const svg=document.querySelector('svg'),drawing=document.getElementById('drawing'),original=[0,0,__WIDTH__,__HEIGHT__];let box=original.slice(),drag=null;
+function point(e,m){return new DOMPoint(e.clientX,e.clientY).matrixTransform(m||svg.getScreenCTM().inverse())}function view(){svg.setAttribute('viewBox',box.join(' '))}svg.addEventListener('wheel',e=>{e.preventDefault();const p=point(e),k=e.deltaY>0?1.15:1/1.15;box=[p.x-(p.x-box[0])*k,p.y-(p.y-box[1])*k,box[2]*k,box[3]*k];view()},{passive:false});
+svg.addEventListener('pointerdown',e=>{const m=svg.getScreenCTM().inverse();drag={p:point(e,m),m,box:box.slice()};svg.setPointerCapture(e.pointerId)});svg.addEventListener('pointermove',e=>{if(!drag)return;const p=point(e,drag.m);box=[drag.box[0]-(p.x-drag.p.x),drag.box[1]-(p.y-drag.p.y),drag.box[2],drag.box[3]];view()});svg.addEventListener('pointerup',()=>drag=null);svg.addEventListener('pointercancel',()=>drag=null);
+document.getElementById('reset').onclick=()=>{box=original.slice();view()};for(const [control,kind] of [['samples','sample'],['references','reference']])document.getElementById(control).onchange=e=>document.querySelectorAll('.'+kind+'-label').forEach(t=>t.setAttribute('display',e.target.checked?'':'none'));
 function select(id){document.querySelectorAll('circle').forEach(c=>{const active=c.dataset.id===id;c.setAttribute('stroke',active?'#197a9a':'white');c.setAttribute('stroke-width',active?'3':'1');if(active)document.getElementById('info').textContent=c.dataset.info})}document.getElementById('find').onchange=e=>select(e.target.value);document.querySelectorAll('circle').forEach(c=>c.addEventListener('click',()=>{document.getElementById('find').value=c.dataset.id;select(c.dataset.id)}));</script></html>'''
-    page = page.replace("OPTIONS", options).replace("SVG", svg).replace("MINAF", str(args.min_af)).replace("NEIGHBORS", str(args.neighbors))
+    page = page.replace("__OPTIONS__", options).replace("__SVG__", svg).replace("__WIDTH__", str(canvas_width)).replace("__HEIGHT__", str(canvas_height)).replace("MINAF", str(args.min_af)).replace("NEIGHBORS", str(args.neighbors))
     (args.outdir / "ani_network.html").write_text(page)
+
+
+def refresh_existing_analysis(directory, summary_only=False):
+    """Add nearest-reference output and redraw saved coordinates without any ANI."""
+    directory = Path(directory).resolve()
+    _, nodes = read_csv(directory / "network_nodes.csv")
+    _, pairs = read_csv(directory / "ani_pairs.csv")
+    if not nodes or len({n["id"] for n in nodes}) != len(nodes):
+        raise ValueError("network_nodes.csv must contain unique genome IDs")
+    if any(n["kind"] not in ("sample", "reference") for n in nodes):
+        raise ValueError("Unknown node kind in network_nodes.csv")
+    valid_ids = {n["id"] for n in nodes}
+    if any(p["genome_a"] not in valid_ids or p["genome_b"] not in valid_ids for p in pairs):
+        raise ValueError("ani_pairs.csv contains a genome missing from network_nodes.csv")
+    result = nearest_reference_summary(nodes, pairs, directory)
+    if summary_only:
+        return result
+    positions = {}
+    for node in nodes:
+        x, y = float(node["x"]), float(node["y"])
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError("Nonfinite saved graph coordinate")
+        positions[node["id"]] = dict(x=x, y=y, component=int(node["component"]))
+    edges = []
+    for pair in pairs:
+        if pair["status"] == "accepted":
+            record = dict(pair)
+            for field in ("ani_used", "aligned_fraction_a_to_b", "aligned_fraction_b_to_a", "min_aligned_fraction"):
+                record[field] = float(record[field])
+            record["distance"] = max(100 - identity(record["ani_used"]), .001)
+            edges.append(record)
+    if (directory / "references.csv").is_file():
+        _, references = read_csv(directory / "references.csv")
+        counts = {r["assembly"]: r["total_orf_hits"] for r in references}
+        for node in nodes:
+            if node["kind"] == "reference":
+                node["orf_hits"] = counts.get(node["id"], node.get("orf_hits", ""))
+    _, diagnostics = read_csv(directory / "layout_diagnostics.csv")
+    manifest_path = directory / "run_manifest.json"
+    manifest = read_json(manifest_path)
+    old = manifest.get("arguments", {})
+    args = argparse.Namespace(outdir=directory, min_af=old.get("min_af", .5), neighbors=old.get("neighbors", 5))
+    draw_network(nodes, edges, positions, diagnostics, args)
+    manifest["helper_version"] = VERSION
+    manifest["nearest_reference_definition"] = "highest accepted reciprocal genome ANI; ANI distance = 100 - ANI"
+    write_json(manifest_path, manifest)
+    return result
 
 
 def parser():
@@ -672,6 +849,8 @@ def parser():
     p.add_argument("--neighbors", type=int, default=5, help="Nearest displayed edges per node, plus spanning forest; 0 displays all accepted pairs")
     p.add_argument("--fastani-results", type=Path, help="Reuse existing five-column FastANI output explicitly")
     p.add_argument("--force-ani", action="store_true", help="Recompute ANI instead of using a verified cache")
+    p.add_argument("--ani-scope", choices=("samples", "all"), default="samples",
+                   help="samples: all sample pairs and reciprocal sample/reference pairs; all: also compare references to each other")
     return p
 
 
@@ -705,9 +884,10 @@ def main(argv=None):
         work = args.outdir / "work"
         work.mkdir(exist_ok=True)
         nodes = prepare_nodes(overviews, references, master, args, work)
-        LOG.info("Calculating all-vs-all ANI for %s genomes with sequences", sum(bool(n["staged_file"]) for n in nodes))
+        LOG.info("Calculating ANI for %s genomes with sequences (scope: %s)", sum(bool(n["staged_file"]) for n in nodes), args.ani_scope)
         directional, stage = calculate_ani(nodes, args, work)
         edges = pairwise_tables(nodes, directional, args)
+        nearest_reference_summary(nodes, edges, args.outdir)
         LOG.info("%s reciprocal pairs passed ANI/aligned-fraction thresholds", len(edges))
         positions, diagnostics = embed_network(nodes, edges)
         draw_network(nodes, edges, positions, diagnostics, args)
