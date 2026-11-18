@@ -9,6 +9,11 @@ documents `spraynpray_compare.py`, which combines per-sample hit summaries,
 runs all-vs-all genome ANI including reference assemblies, and draws an
 interactive map with black samples and gray references.
 
+**Genome-folder wrapper:** [README_pipeline.md](README_pipeline.md) covers
+`spraynpray_pipeline.py`, from per-sample V2 analysis through the cohort map.
+`spraynpray_helper.py` adds nearest-reference summaries and separated reference
+labels to existing comparison results without rerunning ANI.
+
 ## Rapid and simple taxonomic profiling of genome and metagenome contigs 
 #### - Bin validation
 #### - Metagenome profiling

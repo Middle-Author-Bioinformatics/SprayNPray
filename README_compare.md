@@ -98,9 +98,20 @@ python spraynpray_compare.py \
 
 ## ANI calculation
 
-The full run compares the **union of sample genomes and selected references**
-against itself in both directions with `fastANI --ql ... --rl ...`. This
-includes sample/sample, sample/reference and reference/reference comparisons.
+The default `--ani-scope samples` compares **all sample/sample pairs and all
+sample/reference pairs in both directions**, skipping reference/reference
+comparisons. It uses a sample-query job against the full sequence set and a
+reference-query job against the samples. This keeps the comparisons needed
+for sample relationships and nearest references while avoiding quadratic work
+among references. Use `--ani-scope all` for the previous full-union all-vs-all
+analysis, including references against one another.
+
+For S samples and R references, the requested directional comparisons drop
+from `(S + R)^2` to `S^2 + 2SR`. For example, 40 samples and 1,000 references
+require 81,600 instead of 1,081,600 directional comparisons. This is a work
+count, not a guaranteed wall-time speedup. All sample/reference ANI evidence
+is retained. For further reductions, `--top-references-per-sample 3` narrows
+the reference set; nearest matches then apply only to that selected set.
 All FASTAs are normalized into unambiguous staged paths, and duplicate
 sequence content still retains separate biological/sample labels.
 
@@ -152,8 +163,45 @@ regardless of which lines are drawn.
 
 `ani_network.html` is self-contained and works offline. Hover nodes and lines,
 zoom with the mouse wheel, drag to pan, toggle labels, or find a genome in the
-selector. PNG and SVG versions are also produced for export. Colors are fixed:
-black samples, gray references.
+selector. Reference accession/organism labels are now spread into two outer
+columns, with dashed leader lines linking labels to the unchanged genome
+points. The labels have separate nonoverlapping boxes, even when genome dots
+coincide. Dashed leaders are label connectors, not ANI edges. Tall label sets
+can be scrolled; reference labels are visible by default and can be toggled.
+PNG and SVG versions are also produced for export. Colors are fixed: black
+samples, gray references.
+
+## Concise nearest-reference result and helper
+
+Every full run now writes `nearest_references.csv`: **one row per sample**,
+with the closest included reference, estimated overall genome ANI, exact ANI
+distance (`100 - ANI`), minimum reciprocal aligned fraction, tie count and
+status. The closest reference is the one with the **highest accepted measured
+ANI**, not the shortest approximate 2D line. Overall ANI here is the mean of
+the reciprocal genome ANI estimates for that sample/reference pair; it is not
+protein identity or an average over all references.
+
+Equal ANI ties (within 0.000001 percentage points) are counted; the displayed
+reference is chosen by highest minimum aligned fraction, then accession.
+No accepted reference produces a blank ANI and `no_accepted_reference`.
+The distance column uses `100 - ANI` without the tiny numerical floor used
+in fitting the graph. Values are rounded to five decimals for readability;
+the full observations remain in `ani_pairs.csv`.
+
+To add this summary and improve labels on an **existing** completed output:
+
+```bash
+python spraynpray_helper.py --analysis-dir /path/to/cohort_ani
+```
+
+Keep the helper beside the updated `spraynpray_compare.py`. It reads the saved
+`ani_pairs.csv`, `network_nodes.csv` and `layout_diagnostics.csv`, preserves
+the saved genome coordinates and ANI measurements, and rewrites only the
+nearest-reference result and plot outputs/plot metadata. It runs no gene
+prediction, alignment, reference download or ANI calculation. Use
+`--summary-only` for just the concise CSV without plotting dependencies.
+
+See [README_pipeline.md](README_pipeline.md) for the genome-folder wrapper.
 
 ## Outputs and reuse
 
@@ -163,7 +211,8 @@ black samples, gray references.
 | `sample_overview.csv` | Selected, matched, unmapped and no-hit ORF counts per sample. |
 | `orf_hits.csv` | Parsed individual ORF evidence for audit/reanalysis. |
 | `references.csv` | All observed references, hit counts, sample counts and ANI inclusion flags. |
-| `ani_pairs.csv` | Every unordered pair, both directional estimates/AFs, mean ANI and acceptance status. |
+| `nearest_references.csv` | One closest accepted reference and overall estimated genome ANI per sample. |
+| `ani_pairs.csv` | Every requested unordered pair, both directional estimates/AFs, mean ANI and acceptance status. Reference-only pairs are omitted in the default sample-focused scope. |
 | `ani_directional.csv` | Every actual directional FastANI observation. |
 | `ani_matrix.csv` | Symmetric mean-ANI matrix for accepted pairs; unmeasured/excluded cells are blank. |
 | `aligned_fraction_matrix.csv` | Minimum reciprocal aligned fraction for accepted pairs. |
@@ -177,6 +226,11 @@ completed ANI. The cache validates normalized genome SHA-256 digests,
 fragment length, engine settings and the raw output digest. Changing plot
 thresholds, edge counts or thread count can reuse ANI. Failed/partial tool
 outputs are never marked complete. `--force-ani` deliberately recomputes ANI.
+Existing version 0.1 full all-vs-all results are reusable by the new default:
+they already contain every required sample-linked comparison. A sample-only
+cache cannot satisfy a later full `--ani-scope all` request. The two jobs in
+sample-focused mode are also cached independently, so an interruption during
+the second job does not repeat the completed first job.
 `--fastani-results` can explicitly reuse a five-column FastANI output whose
 genome fields use the original absolute input paths, staged paths or node IDs.
 
