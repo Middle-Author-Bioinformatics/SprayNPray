@@ -17,9 +17,10 @@ beside one another in the repository. The optional existing-result helper is
 `spraynpray_helper.py`.
 
 ```bash
-conda create -n spraynpray-pipeline -c conda-forge -c bioconda \
-  python=3.11 prodigal diamond fastani ncbi-datasets-cli numpy scipy matplotlib
-conda activate spraynpray-pipeline
+# From the repository checkout; see README.md for cloning instructions.
+conda config --set channel_priority strict
+mamba env create -f environment.yml
+conda activate spraynpray
 ```
 
 ## Run

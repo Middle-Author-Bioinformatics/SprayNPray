@@ -1,0 +1,14 @@
+name: spraynpray
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=3.11
+  - prodigal=2.6.*
+  - diamond>=2,<3
+  - fastani
+  - ncbi-datasets-cli
+  - numpy
+  - scipy
+  - matplotlib
