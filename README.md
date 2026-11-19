@@ -108,6 +108,15 @@ the total CPU budget; `--sample-jobs 4 --threads 32` permits four concurrent
 V2 sample runs with eight DIAMOND threads each. See the
 [pipeline guide](README_pipeline.md) for memory considerations and all options.
 
+The map defaults to each sample's **10 closest references by accepted genome
+ANI**, with up to 10 reference connections per sample. Shared references appear
+once; every input sample remains visible. Change the display with
+`--network-references-per-sample 20`, or use `0` for all reference nodes. This
+controls the plot only and preserves the full ANI results and closest-reference
+summary. It differs from the hit-count-based analysis limit above. Click any
+dot in the HTML to view genome details, including available strain/isolate
+metadata and ANI context.
+
 Rerun with the same output directory to reuse compatible completed Prodigal,
 DIAMOND and ANI stages. Use `--force-reblast` or `--force-ani` only when you
 want to recompute those stages.
@@ -163,6 +172,12 @@ comparison output, without recalculating ANI:
 python spraynpray_helper.py --analysis-dir /path/to/cohort_ani
 ```
 
+For older outputs, add `--assembly-info /path/to/ncbi_assembly_info.tsv` to
+enrich reference strain/isolate details in the click panel. New wrapper runs
+pass this metadata automatically.
+
+The helper also applies the top-10 reference display without recalculating ANI;
+pass `--network-references-per-sample 0` to restore all reference nodes.
 Add `--summary-only` to the helper for just `nearest_references.csv`.
 Each script documents its flags with `--help`.
 

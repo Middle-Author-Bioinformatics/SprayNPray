@@ -70,8 +70,8 @@ def compare_command(args):
     command = [sys.executable, str(ROOT / "spraynpray_compare.py"),
                "--results", str(args.outdir / "spraynpray_combined"),
                "--genomes", str(args.outdir / "assemblies_combined"),
-               "--outdir", str(args.outdir / "cohort_ani")]
-    for name in ("threads", "fastani", "datasets", "frag_len", "min_af", "min_ani", "neighbors", "ani_scope", "top_references_per_sample"):
+               "--outdir", str(args.outdir / "cohort_ani"), "--assembly-info", str(args.assembly_info.resolve())]
+    for name in ("threads", "fastani", "datasets", "frag_len", "min_af", "min_ani", "neighbors", "ani_scope", "top_references_per_sample", "network_references_per_sample"):
         command.extend(["--" + name.replace("_", "-"), str(getattr(args, name))])
     if args.reference_dir is not None:
         command.extend(["--reference-dir", str(args.reference_dir.resolve())])
@@ -116,6 +116,8 @@ def parser():
     p.add_argument("--frag-len", type=int, default=3000)
     p.add_argument("--min-af", type=float, default=.5)
     p.add_argument("--min-ani", type=float, default=80)
+    p.add_argument("--network-references-per-sample", type=int, default=10,
+                   help="Top references shown per sample ranked by accepted genome ANI; 0 shows all reference nodes")
     p.add_argument("--neighbors", type=int, default=5)
     p.add_argument("--ani-scope", choices=("samples", "all"), default="samples")
     p.add_argument("--force-ani", action="store_true")
@@ -131,7 +133,7 @@ def main(argv=None):
         p.error("--sample-jobs cannot exceed the total --threads budget")
     if args.reference_dir is not None and not args.reference_dir.is_dir():
         p.error("--reference-dir must be an existing directory")
-    if not 0 <= args.min_af <= 1 or not 0 <= args.min_ani <= 100 or args.frag_len < 100 or args.neighbors < 0 or args.top_references_per_sample < 0:
+    if not 0 <= args.min_af <= 1 or not 0 <= args.min_ani <= 100 or args.frag_len < 100 or args.neighbors < 0 or args.top_references_per_sample < 0 or args.network_references_per_sample < 0:
         p.error("Invalid ANI threshold, fragment length, neighbor count or reference limit")
     for path in (args.protein_to_genome, args.assembly_info, args.taxdump / "nodes.dmp", args.taxdump / "names.dmp"):
         if not path.is_file():

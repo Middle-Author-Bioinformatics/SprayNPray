@@ -17,14 +17,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--analysis-dir", type=Path, required=True, help="Existing spraynpray_compare output folder")
     parser.add_argument("--summary-only", action="store_true", help="Only write nearest_references.csv; no plotting dependencies needed")
+    parser.add_argument("--network-references-per-sample", type=int, default=10,
+                        help="Top ANI reference connections shown per sample (default: 10); 0 shows all reference nodes")
+    parser.add_argument("--assembly-info", type=Path, help="Optional NCBI assembly TSV to add reference strain/isolate details to older results")
     args = parser.parse_args(argv)
+    if args.network_references_per_sample < 0:
+        parser.error("--network-references-per-sample must be nonnegative")
     try:
-        result = refresh_existing_analysis(args.analysis_dir, args.summary_only)
+        result = refresh_existing_analysis(args.analysis_dir, args.summary_only, args.network_references_per_sample, args.assembly_info)
     except (ValueError, OSError, ImportError, KeyError) as exc:
         parser.exit(1, str(exc) + "\n")
     print("Wrote nearest_references.csv for %s samples" % len(result))
     if not args.summary_only:
-        print("Updated HTML/SVG reference labels using the saved genome coordinates")
+        print("Updated network reference selection and labels using the saved genome coordinates")
     print("Existing ANI measurements were reused; no analyses were rerun")
     return 0
 

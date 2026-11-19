@@ -54,6 +54,17 @@ local genomes using `--reference-dir`; `--no-download` and
 `--allow-missing-references` are passed through. The optional
 `--top-references-per-sample N` limits references for a smaller first run.
 
+The map shows up to **10 closest reference connections per sample**, ranked by
+accepted reciprocal genome ANI. Shared references are drawn once; all input
+samples remain visible. `--network-references-per-sample N` changes this display
+limit; `0` restores all reference nodes. This does not restrict ANI computation,
+tables, or the nearest-reference summary. The separate
+`--top-references-per-sample` option above restricts analysis inputs by protein
+hit count. The interactive HTML supports click-to-select genome details, including
+strain/isolate metadata when present. The wrapper passes `--assembly-info` to
+the comparison stage automatically; input samples are distinguished from the
+metadata of their closest reference.
+
 ## CPU allocation and resuming
 
 `--threads` is the total CPU budget. Per-sample V2 jobs run sequentially by

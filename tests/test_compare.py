@@ -249,6 +249,181 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(nearest[1]["estimated_ani"], "")
         self.assertEqual(nearest[1]["status"], "no_accepted_reference")
 
+    def test_top_hit_metadata_survives_summary_and_reference_nodes(self):
+        path = self.results / "sample_a.csv"
+        fields = ["orf", "protein_accession", "source_genome_accession", "pident", "taxa", "status",
+                  "assembly_infraspecific_name", "assembly_isolate", "assembly_bioproject", "assembly_taxid",
+                  "assembly_assembly_accession", "metadata_match"]
+        compare.write_csv(path, fields, [dict(orf="a_1", protein_accession="WP_1.1", source_genome_accession="GCF_000001.1",
+            pident=99, taxa="Pseudomonas aeruginosa", status="matched", assembly_infraspecific_name="strain=PAO1",
+            assembly_isolate="isolate-X", assembly_bioproject="PRJNA1", assembly_taxid="287",
+            assembly_assembly_accession="GCA_000001.1", metadata_match="identical_pair")])
+        master, overview, refs = compare.summarize(self.results, self.out)
+        self.assertEqual(master[0]["strain"], "PAO1")
+        self.assertEqual(master[0]["isolate"], "isolate-X")
+        fasta = self.base / "sample_a.fa"
+        fasta.write_text(">a\nACGT\n")
+        args = SimpleNamespace(genomes=self.base, genome_extension=".fa")
+        with patch.object(compare, "resolve_references", return_value={"GCF_000001.1": fasta}):
+            nodes = compare.prepare_nodes(overview, refs, master, args, self.work)
+        self.assertEqual(nodes[1]["strain"], "PAO1")
+        self.assertEqual(nodes[1]["metadata_match"], "identical_pair")
+        self.assertNotIn("strain", nodes[0])
+
+    def test_metadata_enrichment_uses_exact_versions_and_missing_values(self):
+        path = self.base / "metadata.tsv.gz"
+        import gzip
+        with gzip.open(path, "wt") as f:
+            f.write("## assembly summary\n#assembly_accession\torganism_name\tinfraspecific_name\tisolate\ttaxid\n"
+                    "GCF_000001.1\tPseudomonas aeruginosa\tstrain=PAO1\tna\t287\n"
+                    "GCA_000002.1\tOther species\tstrain=wrong\twrong\t1\n")
+        nodes = [dict(id="GCF_000001.1", kind="reference"), dict(id="GCF_000002.1", kind="reference")]
+        compare.enrich_reference_nodes(nodes, path)
+        self.assertEqual(nodes[0]["strain"], "PAO1")
+        self.assertEqual(nodes[0].get("isolate", ""), "")
+        self.assertEqual(nodes[0]["taxid"], "287")
+        self.assertNotIn("strain", nodes[1])
+        self.assertEqual(compare.annotation_values({"infraspecific_name": "serovar=Typhi"})["strain"], "")
+
+    def test_click_details_separate_sample_and_reference_strain(self):
+        nodes = [dict(id="sample", kind="sample", length_bp=1000, contigs=2, n50=600),
+                 dict(id="ref", kind="reference", organism="Pseudomonas aeruginosa", strain="PAO1", isolate="X")]
+        edges = [dict(genome_a="sample", genome_b="ref", ani_used=99.5, min_aligned_fraction=.9, status="accepted")]
+        sample = compare.genome_details(nodes[0], nodes, edges)
+        self.assertIn("Strain: Not provided", sample)
+        self.assertIn("Reference strain: PAO1", sample)
+        self.assertIn("Mean reciprocal genome ANI: 99.50000%", sample)
+        self.assertIn("Length (bp): 1000", sample)
+        reference = compare.genome_details(nodes[1], nodes, edges)
+        self.assertIn("Strain: PAO1", reference)
+        self.assertIn("Isolate: X", reference)
+        self.assertIn("Closest input sample: sample", reference)
+
+    def test_network_caps_reference_edges_per_sample_by_ani_and_keeps_samples(self):
+        samples = [dict(id=x, kind="sample") for x in ("a", "b", "unlinked")]
+        refs = [dict(id="r%02d" % i, kind="reference", orf_hits=1000-i) for i in range(15)]
+        nodes = samples + refs
+        edges = []
+        for i, ref in enumerate(refs[:12]):
+            for sample, ani in (("a", 99 - i / 10), ("b", 96 + i / 10)):
+                edges.append(dict(genome_a=ref["id"], genome_b=sample, ani_used=ani,
+                                  min_aligned_fraction=.9, distance=100-ani, status="accepted"))
+        sample_pair = dict(genome_a="a", genome_b="b", distance=1, status="accepted")
+        edges.append(sample_pair)
+        # A close reference/reference edge must not pull in an unrelated node.
+        edges.append(dict(genome_a="r00", genome_b="r14", distance=.001, status="accepted"))
+        visible, shown = compare.select_network_references(nodes, list(reversed(edges)))
+        links = {sample: {e["genome_a"] for e in shown if e["genome_b"] == sample and e["genome_a"].startswith("r")} for sample in ("a", "b")}
+        self.assertEqual(links["a"], {"r%02d" % i for i in range(10)})
+        self.assertEqual(links["b"], {"r%02d" % i for i in range(2, 12)})
+        self.assertEqual(len(shown), 21)
+        self.assertIn(sample_pair, shown)
+        self.assertEqual({n["id"] for n in visible}, {n["id"] for n in samples + refs[:12]})
+        self.assertEqual(len({n["id"] for n in visible}), len(visible))
+
+    def test_network_reference_ties_zero_and_unmatched_samples(self):
+        nodes = [dict(id="a", kind="sample")] + [dict(id=x, kind="reference") for x in ("r1", "r2", "r3", "unused")]
+        edges = [dict(genome_a="a", genome_b=ref, ani_used=99, min_aligned_fraction=af,
+                      distance=1, status="accepted") for ref, af in (("r3", .9), ("r1", .8), ("r2", .9))]
+        excluded = dict(genome_a="a", genome_b="unused", ani_used=100,
+                        min_aligned_fraction=.1, distance=.001, status="low_aligned_fraction")
+        visible, shown = compare.select_network_references(nodes, edges + [excluded], limit=1)
+        self.assertEqual([n["id"] for n in visible], ["a", "r2"])
+        self.assertEqual(shown[0]["genome_b"], "r2")
+        self.assertEqual(compare.select_network_references(nodes, edges, limit=0, neighbors=0), (nodes, edges))
+        self.assertEqual(compare.select_network_references(nodes, []), (nodes[:1], []))
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            compare.select_network_references(nodes, edges, limit=-1)
+        args = compare.parser().parse_args(["--results", "results", "--outdir", "out"])
+        self.assertEqual(args.network_references_per_sample, 10)
+        self.assertEqual(args.top_references_per_sample, 0)
+
+    def test_helper_filters_existing_network_and_can_restore_all_without_ani(self):
+        nodes = [dict(id="sample", kind="sample")] + [dict(id="r%02d" % i, kind="reference") for i in range(13)]
+        for node in nodes:
+            node.update(organism="Test species", source_file="local.fa", staged_file="local.fa", sequence_status="available")
+        directional = {}
+        for i, ref in enumerate(nodes[1:]):
+            for pair in (("sample", ref["id"]), (ref["id"], "sample")):
+                directional[pair] = self.measurement(99-i/10)
+        edges = compare.pairwise_tables(nodes, directional, self.args)
+        positions = {node["id"]: dict(x=i/10, y=i%3, component=1) for i, node in enumerate(nodes)}
+        diagnostics = [dict(component=1, nodes=len(nodes), measured_pairs=len(edges), normalized_stress=0, max_distance_error=0)]
+        self.args.network_references_per_sample = 0
+        compare.draw_network(nodes, edges, positions, diagnostics, self.args)
+        pairs_before = compare.sha256(self.out / "ani_pairs.csv")
+        metadata = self.base / "assembly.tsv"
+        metadata.write_text("#assembly_accession\torganism_name\tinfraspecific_name\tisolate\n"
+                            "r00\tTest species\tstrain=PAO1 <special>\tiso-X\n")
+        # Default helper selection changes plots only, not ANI evidence or saved coordinates.
+        with patch.object(compare, "run_command", side_effect=AssertionError("no external tools")), \
+             patch.object(compare, "embed_network", side_effect=AssertionError("no layout recomputation")):
+            result = compare.refresh_existing_analysis(self.out, assembly_info=metadata)
+            self.assertEqual(result[0]["nearest_reference"], "r00")
+            _, saved = compare.read_csv(self.out / "network_nodes.csv")
+            self.assertEqual(len(saved), 14)
+            self.assertEqual(sum(n["displayed"] == "True" for n in saved), 11)
+            for n in saved:
+                self.assertEqual(float(n["x"]), positions[n["id"]]["x"])
+                self.assertEqual(float(n["y"]), positions[n["id"]]["y"])
+            _, shown = compare.read_csv(self.out / "network_edges.csv")
+            self.assertEqual(len(shown), 10)
+            page = (self.out / "ani_network.html").read_text()
+            self.assertEqual(page.count('<circle tabindex='), 11)
+            self.assertNotIn('data-id="r12"', page)
+            self.assertIn('up to 10 reference connections', page)
+            self.assertIn('Strain: PAO1 &lt;special&gt;', page)
+            self.assertIn('aria-label="Genome details"', page)
+            self.assertIn("e.target.closest('circle')", page)
+            self.assertIn("c.addEventListener('click',choose)", page)
+            self.assertIn("c.addEventListener('keydown'", page)
+            compare.refresh_existing_analysis(self.out, network_references_per_sample=0)
+            self.assertEqual((self.out / "ani_network.html").read_text().count('<circle tabindex='), 14)
+        self.assertEqual(pairs_before, compare.sha256(self.out / "ani_pairs.csv"))
+
+    @unittest.skipUnless(shutil.which("node"), "requires Node.js for generated interaction checks")
+    def test_generated_html_click_keyboard_selection_and_circle_pointerdown(self):
+        import re
+        import xml.etree.ElementTree as ET
+        nodes = self.nodes()
+        for node in nodes:
+            node.update(organism="Pseudomonas aeruginosa", sequence_status="available")
+        nodes[2]["strain"] = "PAO1"
+        directional = {(a["id"], b["id"]): self.measurement(99.5) for a in nodes for b in nodes if a != b}
+        edges = compare.pairwise_tables(nodes, directional, self.args)
+        positions = {n["id"]: dict(x=i, y=i%2, component=1) for i, n in enumerate(nodes)}
+        compare.draw_network(nodes, edges, positions, [dict(component=1, nodes=3)], self.args)
+        page = (self.out / "ani_network.html").read_text()
+        svg = ET.fromstring(re.search(r'(<svg.*?</svg>)', page, re.S).group(1))
+        circles = [dict(id=e.attrib["data-id"], info=e.attrib["data-info"]) for e in svg.iter()
+                   if e.tag.endswith("}circle")]
+        script = re.search(r'<script>(.*?)</script>', page, re.S).group(1)
+        harness = r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const element=(dataset={})=>({dataset,events:{},attrs:{},textContent:'',value:'',
+  addEventListener(type,callback){this.events[type]=callback},setAttribute(k,v){this.attrs[k]=v}});
+const circles=INPUT_CIRCLES.map(c=>element(c)), svg=element(),elements={};
+for(const id of ['drawing','find','info','reset','samples','references'])elements[id]=element();
+let captures=0;svg.setPointerCapture=()=>captures++;
+const document={getElementById:id=>elements[id],querySelector:()=>svg,
+  querySelectorAll:selector=>selector==='circle'?circles:[]};
+vm.runInNewContext(INPUT_SCRIPT,{document,DOMPoint:class{}});
+svg.events.pointerdown({target:{closest:()=>circles[0]}});
+assert.equal(captures,0,'circle selection must not be captured by background panning');
+circles[0].events.click();assert.equal(elements.info.textContent,circles[0].dataset.info);
+assert.equal(elements.find.value,circles[0].dataset.id);assert.equal(circles[0].attrs.stroke,'#197a9a');
+let prevented=false;const reference=circles.find(c=>c.dataset.id.startsWith('GCF_'));
+reference.events.keydown({key:'Enter',preventDefault:()=>prevented=true});
+assert.equal(prevented,true);assert.ok(elements.info.textContent.includes('Strain: PAO1'));
+assert.ok(elements.info.textContent.includes('Mean reciprocal genome ANI: 99.50000%'));
+elements.find.onchange({target:{value:circles[1].dataset.id}});
+assert.equal(elements.info.textContent,circles[1].dataset.info);
+elements.find.onchange({target:{value:''}});assert.ok(elements.info.textContent.startsWith('Select a genome'));
+"""
+        # Substitute code after data so metadata cannot alter the JavaScript harness.
+        harness = harness.replace("INPUT_CIRCLES", json.dumps(circles)).replace("INPUT_SCRIPT", json.dumps(script))
+        subprocess.run([shutil.which("node"), "-"], input=harness, text=True, capture_output=True, check=True)
+
     def test_reference_label_boxes_do_not_overlap_or_move_genome_points(self):
         nodes = [dict(id="r%03d" % i, kind="reference", organism="Pseudomonas aeruginosa very long strain name " * 2) for i in range(60)]
         nodes += [dict(id="sample", kind="sample")]

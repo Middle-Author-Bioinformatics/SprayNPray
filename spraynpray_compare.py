@@ -27,7 +27,7 @@ import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 LOG = logging.getLogger("spraynpray_compare")
 ACCESSION = re.compile(r"GC[AF]_\d+\.\d+")
 ENTRY = re.compile(
@@ -111,6 +111,59 @@ def parse_summary_entries(text):
             raise ValueError("Trailing separator in ORF match summary")
 
 
+ANNOTATION_FIELDS = ["strain", "isolate", "infraspecific_name", "taxid", "bioproject", "biosample",
+                     "assembly_level", "metadata_assembly_accession", "metadata_match"]
+
+
+def annotation_values(row, prefix=""):
+    def clean(field):
+        value = row.get(prefix + field, "").strip()
+        return "" if value.lower() in ("na", "n/a", "none", "not available", "-") else value
+    infra = clean("infraspecific_name")
+    return dict(strain=infra.split("=", 1)[1] if infra.lower().startswith("strain=") else "",
+                isolate=clean("isolate"), infraspecific_name=infra, taxid=clean("taxid"),
+                bioproject=clean("bioproject"), biosample=clean("biosample"), assembly_level=clean("assembly_level"),
+                metadata_assembly_accession=clean("assembly_accession"))
+
+
+def enrich_reference_nodes(nodes, assembly_info=None):
+    """Stream optional NCBI metadata, matching exact versioned accessions only."""
+    if assembly_info is None:
+        return
+    wanted = {n["id"]: n for n in nodes if n["kind"] == "reference"}
+    opener = gzip.open if str(assembly_info).endswith(".gz") else open
+    header, seen = None, {}
+    with opener(assembly_info, "rt") as handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip() or line.startswith("##"):
+                continue
+            if line.lstrip("# ").startswith("assembly_accession\t"):
+                header = line.lstrip("# ").rstrip("\r\n").split("\t")
+                if len(header) != len(set(header)) or "organism_name" not in header:
+                    raise ValueError("Invalid assembly metadata header")
+                continue
+            if line.startswith("#"):
+                continue
+            if header is None:
+                raise ValueError("Missing TAB-separated assembly_accession header in metadata")
+            fields = line.rstrip("\r\n").split("\t")
+            if len(fields) != len(header):
+                raise ValueError("Assembly metadata row width mismatch at line %s" % number)
+            row = dict(zip(header, fields))
+            accession = row["assembly_accession"]
+            if accession in wanted:
+                if accession in seen and seen[accession] != row:
+                    raise ValueError("Conflicting assembly metadata for " + accession)
+                seen[accession] = row
+                node = wanted[accession]
+                node.update({k: v for k, v in annotation_values(row).items() if v})
+                if row.get("organism_name", "").strip().lower() not in ("", "na"):
+                    node["organism"] = row["organism_name"]
+                node["metadata_match"] = "exact"
+    if header is None:
+        raise ValueError("Missing assembly metadata header")
+
+
 def load_sample(path):
     fields, rows = read_csv(path)
     hits, selected = [], 0
@@ -137,7 +190,8 @@ def load_sample(path):
                 raise ValueError("Invalid source assembly in " + str(path))
             hits.append(dict(orf=row["orf"], contig=row.get("contig", ""),
                              assembly="" if no_hit else assembly, organism=row.get("taxa", ""),
-                             protein=row["protein_accession"], identity=None if no_hit else identity(row["pident"])))
+                             protein=row["protein_accession"], identity=None if no_hit else identity(row["pident"]),
+                             **dict(annotation_values(row, "assembly_"), metadata_match=row.get("metadata_match", ""))))
     else:
         raise ValueError("Expected V2 contig summary or top_hits.csv columns: " + str(path))
     if len({h["orf"] for h in hits}) != len(hits):
@@ -155,7 +209,9 @@ def load_sample(path):
                             hit_percent=100 * len(group) / len(matched),
                             selected_orf_percent=100 * len(group) / selected if selected else 0,
                             mean_protein_identity=statistics.mean(values),
-                            min_protein_identity=min(values), max_protein_identity=max(values)))
+                            min_protein_identity=min(values), max_protein_identity=max(values),
+                            **{field: " | ".join(sorted({h.get(field, "") for h in group if h.get(field)}))
+                               for field in ANNOTATION_FIELDS}))
     overview = dict(sample=path.stem, source_csv=str(path.resolve()), selected_orfs=selected,
                     matched_orfs=len(matched), no_hit_orfs=selected - len(matched),
                     unmapped_hit_orfs=sum(h["assembly"] == "unmapped" for h in matched),
@@ -180,10 +236,10 @@ def summarize(folder, outdir, top_references=0):
             references = references[:top_references]
         selected_refs.update(r["reference_assembly"] for r in references)
     fields = ["sample", "reference_assembly", "organism_names", "orf_hits", "matched_orfs", "selected_orfs",
-              "hit_percent", "selected_orf_percent", "mean_protein_identity", "min_protein_identity", "max_protein_identity"]
+              "hit_percent", "selected_orf_percent", "mean_protein_identity", "min_protein_identity", "max_protein_identity"] + ANNOTATION_FIELDS
     write_csv(outdir / "master_summary.csv", fields, master)
     write_csv(outdir / "sample_overview.csv", list(overviews[0]), overviews)
-    write_csv(outdir / "orf_hits.csv", ["sample", "contig", "orf", "assembly", "organism", "protein", "identity"], hits)
+    write_csv(outdir / "orf_hits.csv", ["sample", "contig", "orf", "assembly", "organism", "protein", "identity"] + ANNOTATION_FIELDS, hits)
     references = sorted({r["reference_assembly"] for r in master if r["reference_assembly"] != "unmapped"})
     write_csv(outdir / "references.csv", ["assembly", "organism_names", "total_orf_hits", "samples_with_hits", "selected_for_ani"], [
         dict(assembly=a, organism_names=" | ".join(sorted({r["organism_names"] for r in master if r["reference_assembly"] == a})),
@@ -318,13 +374,13 @@ def resolve_references(accessions, args, work):
             except (subprocess.CalledProcessError, zipfile.BadZipFile) as exc:
                 if not args.allow_missing_references:
                     raise
-                LOG.warning("Reference download batch failed; its missing references remain unlinked: %s", exc)
+                LOG.warning("Reference download batch failed; its missing references will lack ANI: %s", exc)
         missing = [a for a in accessions if resolved.get(a) is None]
     if missing:
         write_csv(args.outdir / "missing_references.csv", ["assembly"], [dict(assembly=a) for a in missing])
         if not args.allow_missing_references:
-            raise ValueError("Missing exact reference versions; see missing_references.csv. Supply local FASTAs or use --allow-missing-references to show these as unlinked gray nodes.")
-        LOG.warning("%s references have no sequence and will be unlinked", len(missing))
+            raise ValueError("Missing exact reference versions; see missing_references.csv. Supply local FASTAs or use --allow-missing-references to retain them without ANI.")
+        LOG.warning("%s references have no sequence; retained in tables but excluded from the default ANI-ranked map", len(missing))
     elif (args.outdir / "missing_references.csv").exists():
         (args.outdir / "missing_references.csv").unlink()
     return resolved
@@ -344,7 +400,10 @@ def prepare_nodes(overviews, references, master, args, work):
         groups = [r for r in master if r["reference_assembly"] == reference]
         nodes.append(dict(id=reference, kind="reference", organism=" | ".join(sorted({r["organism_names"] for r in groups})),
                           source_file=str(reference_paths[reference]) if reference_paths[reference] else "",
-                          orf_hits=sum(r["orf_hits"] for r in groups)))
+                          orf_hits=sum(r["orf_hits"] for r in groups),
+                          **{field: " | ".join(sorted({r.get(field, "") for r in groups if r.get(field)}))
+                             for field in ANNOTATION_FIELDS}))
+    enrich_reference_nodes(nodes, getattr(args, "assembly_info", None))
     if len({n["id"] for n in nodes}) != len(nodes):
         raise ValueError("A sample filename collides with a reference accession; rename that sample")
     staged = work / "genomes"
@@ -652,6 +711,42 @@ def display_edges(nodes, edges, neighbors):
     return [edges[index] for index in sorted(selected)]
 
 
+def select_network_references(nodes, edges, limit=10, neighbors=5):
+    """Keep each sample's top ANI references and sparse sample/sample links.
+
+    Reference selection is per sample, so a shared reference selected by
+    another sample cannot add a lower-ranked edge to this sample. A zero
+    limit restores the original unrestricted graph/edge selection.
+    """
+    if limit < 0:
+        raise ValueError("Network reference limit must be nonnegative")
+    if limit == 0:
+        return nodes, display_edges(nodes, edges, neighbors)
+    kinds = {n["id"]: n["kind"] for n in nodes}
+    candidates = defaultdict(list)
+    sample_edges = []
+    for edge in edges:
+        if edge.get("status", "accepted") != "accepted":
+            continue
+        a, b = edge["genome_a"], edge["genome_b"]
+        if kinds[a] == kinds[b] == "sample":
+            sample_edges.append(edge)
+        elif {kinds[a], kinds[b]} == {"sample", "reference"}:
+            sample, reference = (a, b) if kinds[a] == "sample" else (b, a)
+            candidates[sample].append((edge, reference))
+    selected, reference_ids = [], set()
+    for sample in sorted(candidates):
+        ranked = sorted(candidates[sample], key=lambda item: (
+            -float(item[0]["ani_used"]), -float(item[0]["min_aligned_fraction"]), item[1]))
+        for edge, reference in ranked[:limit]:
+            selected.append(edge)
+            reference_ids.add(reference)
+    samples = [n for n in nodes if n["kind"] == "sample"]
+    selected.extend(display_edges(samples, sample_edges, neighbors))
+    visible = [n for n in nodes if n["kind"] == "sample" or n["id"] in reference_ids]
+    return visible, selected
+
+
 def expanded_reference_layout(nodes, positions):
     """Put full reference labels in two nonoverlapping outer columns.
 
@@ -694,16 +789,73 @@ def expanded_reference_layout(nodes, positions):
     return xy, labels, width, height
 
 
+def genome_details(node, nodes, edges):
+    """Plain text for the click panel; reference strain never becomes sample strain."""
+    lines = ["Genome: " + node["id"], "Type: " + node["kind"],
+             "Organism: " + (node.get("organism") or "Not provided"),
+             "Strain: " + (node.get("strain") or "Not provided"),
+             "Isolate: " + (node.get("isolate") or "Not provided")]
+    for field, label in (("taxid", "NCBI taxid"), ("bioproject", "BioProject"), ("biosample", "BioSample"),
+                         ("assembly_level", "Assembly level"), ("infraspecific_name", "Infraspecific name"),
+                         ("metadata_assembly_accession", "Metadata assembly"), ("metadata_match", "Metadata match"),
+                         ("length_bp", "Length (bp)"), ("contigs", "Contigs"), ("n50", "N50 (bp)"),
+                         ("source_file", "Source FASTA"), ("sequence_status", "Sequence"), ("component", "Layout component")):
+        if node.get(field) not in (None, ""):
+            lines.append(label + ": " + str(node[field]))
+    by_id = {n["id"]: n for n in nodes}
+    related = []
+    for edge in edges:
+        if edge.get("status", "accepted") != "accepted" or node["id"] not in (edge["genome_a"], edge["genome_b"]):
+            continue
+        other = edge["genome_b"] if node["id"] == edge["genome_a"] else edge["genome_a"]
+        if by_id[other]["kind"] != node["kind"]:
+            related.append((edge, by_id[other]))
+    related.sort(key=lambda item: (-float(item[0]["ani_used"]), -float(item[0]["min_aligned_fraction"]), item[1]["id"]))
+    if node["kind"] == "sample":
+        for field, label in (("selected_orfs", "Selected ORFs"), ("matched_orfs", "Matched ORFs")):
+            if node.get(field) not in (None, ""):
+                lines.append(label + ": " + str(node[field]))
+        if related:
+            edge, reference = related[0]
+            lines.extend(["Nearest reference: " + reference["id"],
+                          "Reference organism: " + (reference.get("organism") or "Not provided"),
+                          "Reference strain: " + (reference.get("strain") or "Not provided"),
+                          "Reference isolate: " + (reference.get("isolate") or "Not provided")])
+        else:
+            lines.append("Nearest reference: No accepted genome ANI comparison")
+    else:
+        lines.append("Protein hits: %s (representative assembly labels)" % node.get("orf_hits", "Not provided"))
+        if related:
+            edge, sample = related[0]
+            lines.append("Closest input sample: " + sample["id"])
+    if related:
+        edge = related[0][0]
+        lines.extend(["Mean reciprocal genome ANI: %.5f%%" % float(edge["ani_used"]),
+                      "Minimum reciprocal aligned fraction: %.3f" % float(edge["min_aligned_fraction"])])
+    return "\n".join(lines)
+
+
 def draw_network(nodes, edges, positions, diagnostics, args):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    shown = display_edges(nodes, edges, args.neighbors)
+    limit = getattr(args, "network_references_per_sample", 10)
+    visible, shown = select_network_references(nodes, edges, limit, args.neighbors)
+    visible_ids = {n["id"] for n in visible}
     for node in nodes:
         node.update(positions[node["id"]])
+        node["displayed"] = node["id"] in visible_ids
+    # Keep all coordinates so the helper can expand the reference limit later.
     write_csv(args.outdir / "network_nodes.csv", ["id", "kind", "organism", "source_file", "sequence_status",
-              "length_bp", "contigs", "n50", "orf_hits", "component", "x", "y"], nodes)
+              "length_bp", "contigs", "n50", "orf_hits", "matched_orfs", "selected_orfs",
+              "component", "x", "y", "displayed"] + ANNOTATION_FIELDS, nodes)
+    adjacent = defaultdict(list)
+    for edge in edges:
+        adjacent[edge["genome_a"]].append(edge)
+        adjacent[edge["genome_b"]].append(edge)
+    details = {n["id"]: genome_details(n, nodes, adjacent[n["id"]]) for n in visible}
+    nodes = visible
     write_csv(args.outdir / "network_edges.csv", PAIR_FIELDS + ["distance"], shown)
     write_csv(args.outdir / "layout_diagnostics.csv", list(diagnostics[0]), diagnostics)
     span_x = max(n["x"] for n in nodes) - min(n["x"] for n in nodes)
@@ -751,12 +903,9 @@ def draw_network(nodes, edges, positions, diagnostics, args):
     for node in sorted(nodes, key=lambda n: n["kind"] == "sample"):
         x, y = xy[node["id"]]
         color = "#111111" if node["kind"] == "sample" else "#b0b0b0"
-        detail = "%s (%s)\n%s\nSequence: %s\nComponent: %s" % (
-            node["id"], node["kind"], node["organism"], node["sequence_status"], node["component"])
-        if node["kind"] == "reference":
-            detail += "\nSprayNPray protein-hit count: %s (representative assembly labels)" % node.get("orf_hits", "")
-        parts.append('<circle data-id="%s" data-info="%s" cx="%.3f" cy="%.3f" r="%s" fill="%s" stroke="white" stroke-width="1"><title>%s</title></circle>' % (
-            html.escape(node["id"], quote=True), html.escape(detail, quote=True), x, y,
+        detail = details[node["id"]]
+        parts.append('<circle tabindex="0" role="button" aria-label="Select genome %s" data-id="%s" data-info="%s" cx="%.3f" cy="%.3f" r="%s" fill="%s" stroke="white" stroke-width="1"><title>%s</title></circle>' % (
+            html.escape(node["id"], quote=True), html.escape(node["id"], quote=True), html.escape(detail, quote=True), x, y,
             4 if node["kind"] == "sample" else 6, color, html.escape(detail)))
         if node["kind"] == "sample":
             parts.append('<text class="sample-label" x="%.3f" y="%.3f" font-size="10" fill="#333">%s</text>' % (
@@ -767,21 +916,27 @@ def draw_network(nodes, edges, positions, diagnostics, args):
     options = '<option value="">Find a genome…</option>' + "".join(
         '<option value="%s">%s (%s)</option>' % (html.escape(n["id"], quote=True), html.escape(n["id"]), n["kind"]) for n in nodes)
     page = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Genome ANI map</title><style>body{font:15px system-ui;margin:28px;color:#20242a;background:#fafafa}h1{font-size:28px;font-weight:600;margin-bottom:8px}p{max-width:1050px;line-height:1.5}.controls{display:flex;gap:18px;align-items:center;flex-wrap:wrap}select,button{padding:8px;border:1px solid #ccd1d6;border-radius:5px;background:white}.map-scroll{max-height:75vh;overflow:auto;margin-top:16px;border:1px solid #e3e6e8;background:white}svg{width:100%;min-width:1200px;height:auto;background:white;touch-action:none}text{pointer-events:none}#info{white-space:pre-line;min-height:55px;font-size:13px;margin-top:12px;color:#445}</style>
-<h1>Genome ANI map</h1><p>Black dots: your samples. Gray dots: SprayNPray reference assemblies. Shorter distances approximate higher genome ANI <strong>within each connected component</strong>. Hover lines for exact ANI and aligned fractions. Scroll to zoom and drag to pan.</p>
-<div class="controls"><select id="find">__OPTIONS__</select><label><input id="samples" type="checkbox" checked>Sample labels</label><label><input id="references" type="checkbox" checked>Reference labels</label><button id="reset">Reset view</button></div><div class="map-scroll">__SVG__</div><div id="info"></div>
+<title>Genome ANI map</title><style>body{font:15px system-ui;margin:28px;color:#20242a;background:#fafafa}h1{font-size:28px;font-weight:600;margin-bottom:8px}p{max-width:1050px;line-height:1.5}.controls{display:flex;gap:18px;align-items:center;flex-wrap:wrap}select,button{padding:8px;border:1px solid #ccd1d6;border-radius:5px;background:white}.map-scroll{max-height:75vh;overflow:auto;margin-top:16px;border:1px solid #e3e6e8;background:white}svg{width:100%;min-width:1200px;height:auto;background:white;touch-action:none}text{pointer-events:none}circle{cursor:pointer}circle:focus{outline:none;stroke:#197a9a;stroke-width:3}#info{white-space:pre-line;min-height:45px;max-height:230px;overflow:auto;font-size:13px;margin-top:12px;padding:14px;border:1px solid #d5dce3;border-radius:6px;background:white;color:#334}</style>
+<h1>Genome ANI map</h1><p>Black dots: your samples. Gray dots: SprayNPray reference assemblies. Shorter distances approximate higher genome ANI <strong>within each connected component</strong>. Click a dot to show genome details, including strain/isolate when provided. Hover lines for exact ANI and aligned fractions. Scroll to zoom and drag the background to pan.</p>
+<div class="controls"><select id="find">__OPTIONS__</select><label><input id="samples" type="checkbox" checked>Sample labels</label><label><input id="references" type="checkbox" checked>Reference labels</label><button id="reset">Reset view</button></div><section id="info" aria-label="Genome details" aria-live="polite">Select a genome dot or use Find a genome to view its details.</section><div class="map-scroll">__SVG__</div>
 <p>Reference names are spread into outer columns with dashed leader lines; genome dots and ANI distances are unchanged. Dashed leaders identify labels and do not represent ANI.</p>
-<p>Distances target <code>100 − mean reciprocal ANI</code>; 2D geometry is an approximation, not a phylogenetic tree. Separate components are placed side by side for display: their gaps are arbitrary. Missing or low-coverage ANI comparisons create no distance constraints. Only pairs with both directions and aligned fractions ≥ MINAF are used. Displayed lines use NEIGHBORS nearest neighbors per node plus a minimum spanning forest (0 means all); all accepted pairs inform the layout. Identical genomes can overlap. Protein-hit percentages indicate representative assembly labels, not strain abundance.</p>
+<p>Distances target <code>100 − mean reciprocal ANI</code>; 2D geometry is an approximation, not a phylogenetic tree. Separate components are placed side by side for display: their gaps are arbitrary. Missing or low-coverage ANI comparisons create no distance constraints. Only pairs with both directions and aligned fractions ≥ MINAF are used. REFERENCE_POLICY NEIGHBOR_POLICY All accepted pairs inform the layout; full ANI measurements remain in ani_pairs.csv. Identical genomes can overlap. Protein-hit percentages indicate representative assembly labels, not strain abundance.</p>
 <script>const svg=document.querySelector('svg'),drawing=document.getElementById('drawing'),original=[0,0,__WIDTH__,__HEIGHT__];let box=original.slice(),drag=null;
 function point(e,m){return new DOMPoint(e.clientX,e.clientY).matrixTransform(m||svg.getScreenCTM().inverse())}function view(){svg.setAttribute('viewBox',box.join(' '))}svg.addEventListener('wheel',e=>{e.preventDefault();const p=point(e),k=e.deltaY>0?1.15:1/1.15;box=[p.x-(p.x-box[0])*k,p.y-(p.y-box[1])*k,box[2]*k,box[3]*k];view()},{passive:false});
-svg.addEventListener('pointerdown',e=>{const m=svg.getScreenCTM().inverse();drag={p:point(e,m),m,box:box.slice()};svg.setPointerCapture(e.pointerId)});svg.addEventListener('pointermove',e=>{if(!drag)return;const p=point(e,drag.m);box=[drag.box[0]-(p.x-drag.p.x),drag.box[1]-(p.y-drag.p.y),drag.box[2],drag.box[3]];view()});svg.addEventListener('pointerup',()=>drag=null);svg.addEventListener('pointercancel',()=>drag=null);
+svg.addEventListener('pointerdown',e=>{if(e.target.closest('circle'))return;const m=svg.getScreenCTM().inverse();drag={p:point(e,m),m,box:box.slice()};svg.setPointerCapture(e.pointerId)});svg.addEventListener('pointermove',e=>{if(!drag)return;const p=point(e,drag.m);box=[drag.box[0]-(p.x-drag.p.x),drag.box[1]-(p.y-drag.p.y),drag.box[2],drag.box[3]];view()});svg.addEventListener('pointerup',()=>drag=null);svg.addEventListener('pointercancel',()=>drag=null);
 document.getElementById('reset').onclick=()=>{box=original.slice();view()};for(const [control,kind] of [['samples','sample'],['references','reference']])document.getElementById(control).onchange=e=>document.querySelectorAll('.'+kind+'-label').forEach(t=>t.setAttribute('display',e.target.checked?'':'none'));
-function select(id){document.querySelectorAll('circle').forEach(c=>{const active=c.dataset.id===id;c.setAttribute('stroke',active?'#197a9a':'white');c.setAttribute('stroke-width',active?'3':'1');if(active)document.getElementById('info').textContent=c.dataset.info})}document.getElementById('find').onchange=e=>select(e.target.value);document.querySelectorAll('circle').forEach(c=>c.addEventListener('click',()=>{document.getElementById('find').value=c.dataset.id;select(c.dataset.id)}));</script></html>'''
+function select(id){document.getElementById('info').textContent='Select a genome dot or use Find a genome to view its details.';document.querySelectorAll('circle').forEach(c=>{const active=c.dataset.id===id;c.setAttribute('stroke',active?'#197a9a':'white');c.setAttribute('stroke-width',active?'3':'1');if(active)document.getElementById('info').textContent=c.dataset.info})}document.getElementById('find').onchange=e=>select(e.target.value);document.querySelectorAll('circle').forEach(c=>{const choose=()=>{document.getElementById('find').value=c.dataset.id;select(c.dataset.id)};c.addEventListener('click',choose);c.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();choose()}})});</script></html>'''
+    policy = ("Each sample shows up to %s reference connections ranked by highest accepted reciprocal genome ANI; "
+              "only references selected by at least one sample are shown. Reference/reference edges are hidden." % limit
+              if limit else "All reference nodes are included; displayed lines use the nearest-neighbor/spanning-forest rule across all nodes.")
+    neighbor_policy = ("Sample/sample lines use NEIGHBORS nearest neighbors plus a minimum spanning forest (0 means all)."
+                       if limit else "Lines use NEIGHBORS nearest neighbors per node plus a minimum spanning forest (0 means all).")
+    page = page.replace("REFERENCE_POLICY", policy).replace("NEIGHBOR_POLICY", neighbor_policy)
     page = page.replace("__OPTIONS__", options).replace("__SVG__", svg).replace("__WIDTH__", str(canvas_width)).replace("__HEIGHT__", str(canvas_height)).replace("MINAF", str(args.min_af)).replace("NEIGHBORS", str(args.neighbors))
     (args.outdir / "ani_network.html").write_text(page)
 
 
-def refresh_existing_analysis(directory, summary_only=False):
+def refresh_existing_analysis(directory, summary_only=False, network_references_per_sample=10, assembly_info=None):
     """Add nearest-reference output and redraw saved coordinates without any ANI."""
     directory = Path(directory).resolve()
     _, nodes = read_csv(directory / "network_nodes.csv")
@@ -793,6 +948,7 @@ def refresh_existing_analysis(directory, summary_only=False):
     valid_ids = {n["id"] for n in nodes}
     if any(p["genome_a"] not in valid_ids or p["genome_b"] not in valid_ids for p in pairs):
         raise ValueError("ani_pairs.csv contains a genome missing from network_nodes.csv")
+    enrich_reference_nodes(nodes, assembly_info)
     result = nearest_reference_summary(nodes, pairs, directory)
     if summary_only:
         return result
@@ -820,9 +976,11 @@ def refresh_existing_analysis(directory, summary_only=False):
     manifest_path = directory / "run_manifest.json"
     manifest = read_json(manifest_path)
     old = manifest.get("arguments", {})
-    args = argparse.Namespace(outdir=directory, min_af=old.get("min_af", .5), neighbors=old.get("neighbors", 5))
+    args = argparse.Namespace(outdir=directory, min_af=old.get("min_af", .5), neighbors=old.get("neighbors", 5),
+                              network_references_per_sample=network_references_per_sample)
     draw_network(nodes, edges, positions, diagnostics, args)
     manifest["helper_version"] = VERSION
+    manifest.setdefault("arguments", {})["network_references_per_sample"] = network_references_per_sample
     manifest["nearest_reference_definition"] = "highest accepted reciprocal genome ANI; ANI distance = 100 - ANI"
     write_json(manifest_path, manifest)
     return result
@@ -834,11 +992,12 @@ def parser():
     p.add_argument("--results", type=Path, required=True, help="Folder with one sample-named SprayNPray .csv per sample")
     p.add_argument("--genomes", type=Path, help="Folder with matching sample FASTAs")
     p.add_argument("--genome-extension", default=".fa", help="Sample FASTA filename suffix")
+    p.add_argument("--assembly-info", type=Path, help="Optional NCBI assembly TSV (.gz supported) for reference strain/isolate and other click details")
     p.add_argument("--reference-dir", type=Path, help="Optional local reference FASTAs, named by exact GCA/GCF accession")
     p.add_argument("-o", "--outdir", type=Path, required=True, help="Output directory; completed ANI can be reused")
     p.add_argument("--summary-only", action="store_true", help="Only produce hit summary tables; no ANI, downloads or plots")
     p.add_argument("--no-download", action="store_true", help="Use only local/cached reference genomes")
-    p.add_argument("--allow-missing-references", action="store_true", help="Show references without FASTAs as unlinked gray nodes")
+    p.add_argument("--allow-missing-references", action="store_true", help="Keep references without FASTAs in tables; visible as unlinked nodes only with --network-references-per-sample 0")
     p.add_argument("--top-references-per-sample", type=int, default=0, help="Limit reference selection by hit count per sample; 0 includes every reference")
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--fastani", default="fastANI", help="FastANI executable")
@@ -846,7 +1005,9 @@ def parser():
     p.add_argument("--frag-len", type=int, default=3000, help="FastANI fragment length")
     p.add_argument("--min-af", type=float, default=0.5, help="Minimum aligned fraction required in both directions for plotted ANI")
     p.add_argument("--min-ani", type=float, default=80, help="Minimum mean ANI used for the map")
-    p.add_argument("--neighbors", type=int, default=5, help="Nearest displayed edges per node, plus spanning forest; 0 displays all accepted pairs")
+    p.add_argument("--network-references-per-sample", type=int, default=10,
+                   help="Display each sample's top N references ranked by accepted genome ANI; 0 includes all reference nodes")
+    p.add_argument("--neighbors", type=int, default=5, help="Nearest sample/sample edges plus spanning forest (all node types when reference limit is 0); 0 shows all such pairs")
     p.add_argument("--fastani-results", type=Path, help="Reuse existing five-column FastANI output explicitly")
     p.add_argument("--force-ani", action="store_true", help="Recompute ANI instead of using a verified cache")
     p.add_argument("--ani-scope", choices=("samples", "all"), default="samples",
@@ -859,9 +1020,11 @@ def main(argv=None):
     args = p.parse_args(argv)
     if not args.results.is_dir():
         p.error("--results must be an existing directory")
+    if args.assembly_info is not None and not args.assembly_info.is_file():
+        p.error("--assembly-info must be an existing TSV file")
     if args.reference_dir is not None and not args.reference_dir.is_dir():
         p.error("--reference-dir must be an existing directory")
-    if args.threads < 1 or args.frag_len < 100 or args.top_references_per_sample < 0 or args.neighbors < 0:
+    if args.threads < 1 or args.frag_len < 100 or args.top_references_per_sample < 0 or args.neighbors < 0 or args.network_references_per_sample < 0:
         p.error("Invalid threads, fragment length, reference limit or neighbor count")
     if not 0 <= args.min_af <= 1 or not 0 <= args.min_ani <= 100:
         p.error("--min-af must be 0 to 1; --min-ani must be 0 to 100")

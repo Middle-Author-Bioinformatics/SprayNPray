@@ -42,8 +42,8 @@ NCBI Datasets folders are also recognized. Use complete genomic FASTAs rather
 than CDS or protein files. Ambiguous duplicate reference files are rejected.
 `--no-download` uses only local/cached references. Missing exact reference
 versions stop the full analysis and are listed in `missing_references.csv`;
-`--allow-missing-references` explicitly permits them as isolated gray nodes
-without ANI measurements. No accession version or GCA/GCF substitution occurs.
+`--allow-missing-references` explicitly retains them without ANI measurements;
+they appear as isolated gray nodes with `--network-references-per-sample 0`. No accession version or GCA/GCF substitution occurs.
 
 For a smaller initial reference set, use `--top-references-per-sample 3`.
 This selects the three references with the most hits in each sample and uses
@@ -152,24 +152,81 @@ distance floor of 0.001 ANI percentage points stabilizes nearly identical
 genomes. Identical/near-identical genomes can overlap visually.
 
 Disconnected components are placed side by side. **Distances between those
-components have no ANI meaning.** Missing sequence references and genomes
-with no accepted comparisons remain visible as isolated nodes. This map is
-not a phylogenetic tree and carries no branch-length or ancestry inference.
+components have no ANI meaning.** Every input sample remains visible, including
+samples with no accepted comparisons. This map is not a phylogenetic tree and
+carries no branch-length or ancestry inference.
 
-For readability, the display uses each node's five nearest accepted neighbors
-plus a minimum spanning forest to preserve connectivity. `--neighbors 0`
-draws every accepted comparison. All accepted pairs still inform the layout
-regardless of which lines are drawn.
+By default, `--network-references-per-sample 10` shows each sample's **10 closest
+references ranked by accepted mean reciprocal genome ANI**. Fewer are shown
+if fewer pass the ANI/aligned-fraction thresholds. Ties are resolved by higher
+minimum reciprocal aligned fraction, then accession. This is independent of
+protein hit frequency and approximate 2D distance.
 
-`ani_network.html` is self-contained and works offline. Hover nodes and lines,
-zoom with the mouse wheel, drag to pan, toggle labels, or find a genome in the
-selector. Reference accession/organism labels are now spread into two outer
+Only the union of those selected references appears as gray nodes; a reference
+shared by several samples appears once. Each sample has at most 10 reference
+connections, even if additional references were selected by another sample.
+Reference/reference lines are hidden. The union can exceed 10 references for
+a cohort. Black sample nodes retain sample/sample connections using the five
+nearest accepted sample neighbors plus a minimum spanning forest; `--neighbors 0`
+shows all accepted sample/sample pairs. These sample links do not add extra
+reference connections.
+
+Use `--network-references-per-sample 20` to increase the limit, or `0` to restore
+all reference nodes and the original nearest-neighbor/spanning-forest rule
+across all nodes. With both limits set to zero, every accepted pair is drawn.
+References without sequences or accepted sample ANI are hidden by the default
+reference filter and are available as isolated nodes in unrestricted mode.
+All accepted pairs still inform the layout regardless of which nodes/lines
+are drawn. The complete ANI tables, nearest-reference result, reference downloads
+and ANI computation are unaffected by this **display-only** limit. The separate
+`--top-references-per-sample` option restricts the analysis reference set by
+protein-hit count before downloading/calculating ANI.
+
+`ani_network.html` is self-contained and works offline. **Click a dot** to open
+its genome details in the panel above the map, or use Find a genome. Tab to a
+dot and press Enter/Space for keyboard selection. Hover nodes and lines, zoom
+with the mouse wheel, drag the background to pan, or toggle labels. Reference accession/organism labels are now spread into two outer
 columns, with dashed leader lines linking labels to the unchanged genome
 points. The labels have separate nonoverlapping boxes, even when genome dots
 coincide. Dashed leaders are label connectors, not ANI edges. Tall label sets
 can be scrolled; reference labels are visible by default and can be toggled.
 PNG and SVG versions are also produced for export. Colors are fixed: black
 samples, gray references.
+
+### Genome details and strain metadata
+
+The selected genome panel shows its sample ID or reference accession, type,
+organism, **strain and isolate when available**, NCBI taxid, BioProject,
+BioSample, assembly level, sequence length, contig count, N50 and source FASTA.
+Sample panels include their closest accepted reference and its organism,
+strain/isolate, reciprocal genome ANI and aligned fraction. Reference panels
+include the closest input sample and ANI. Missing fields say `Not provided`;
+a reference's strain is never assigned to the input sample as its own strain.
+
+V2 `top_hits.csv` inputs carry the available `assembly_*` metadata into the
+summary, reference nodes and plot. The genome-folder wrapper also passes its
+existing `--assembly-info` file to the comparison stage automatically. For
+standalone comparisons of older contig CSVs, optionally add:
+
+```bash
+--assembly-info /path/to/ncbi_assembly_info.tsv
+```
+
+For already completed analyses, use:
+
+```bash
+python spraynpray_helper.py \
+  --analysis-dir /path/to/cohort_ani \
+  --assembly-info /path/to/ncbi_assembly_info.tsv
+```
+
+This enriches exact versioned reference accessions and updates the top-10 map
+and click panel without downloads, DIAMOND or ANI. Gzip-compressed assembly TSVs
+are supported. Explicit `strain=...` and isolate fields are used; strain names
+are not guessed from sample filenames or organism-name suffixes. Original
+organism names are retained when no separate strain field is available.
+Metadata saved in `network_nodes.csv` survives subsequent helper redraws, so
+the assembly TSV is only needed once to enrich those older outputs.
 
 ## Concise nearest-reference result and helper
 
@@ -201,6 +258,11 @@ nearest-reference result and plot outputs/plot metadata. It runs no gene
 prediction, alignment, reference download or ANI calculation. Use
 `--summary-only` for just the concise CSV without plotting dependencies.
 
+The helper also applies the default top-10 ANI reference display to existing
+results. Pass `--network-references-per-sample 20` to change it or `0` to restore
+all references. Saved coordinates for hidden references are retained, so a
+later helper run can expand the display without repeating ANI or embedding.
+
 See [README_pipeline.md](README_pipeline.md) for the genome-folder wrapper.
 
 ## Outputs and reuse
@@ -216,7 +278,7 @@ See [README_pipeline.md](README_pipeline.md) for the genome-folder wrapper.
 | `ani_directional.csv` | Every actual directional FastANI observation. |
 | `ani_matrix.csv` | Symmetric mean-ANI matrix for accepted pairs; unmeasured/excluded cells are blank. |
 | `aligned_fraction_matrix.csv` | Minimum reciprocal aligned fraction for accepted pairs. |
-| `network_nodes.csv`, `network_edges.csv` | Node identities, coordinates and the displayed edges with ANI. |
+| `network_nodes.csv`, `network_edges.csv` | All node identities/coordinates with a `displayed` flag, and only the displayed edges with ANI. Hidden coordinates are retained for helper redraws. |
 | `layout_diagnostics.csv` | Embedding error by component. |
 | `ani_network.html`, `.png`, `.svg` | Interactive/offline and static maps. |
 | `work/` | Staged input genomes, downloaded references, raw FastANI output, logs and the ANI cache. |
