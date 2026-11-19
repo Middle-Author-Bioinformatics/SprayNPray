@@ -314,11 +314,11 @@ class CompareTests(unittest.TestCase):
         edges.append(dict(genome_a="r00", genome_b="r14", distance=.001, status="accepted"))
         visible, shown = compare.select_network_references(nodes, list(reversed(edges)))
         links = {sample: {e["genome_a"] for e in shown if e["genome_b"] == sample and e["genome_a"].startswith("r")} for sample in ("a", "b")}
-        self.assertEqual(links["a"], {"r%02d" % i for i in range(10)})
-        self.assertEqual(links["b"], {"r%02d" % i for i in range(2, 12)})
-        self.assertEqual(len(shown), 21)
+        self.assertEqual(links["a"], {"r%02d" % i for i in range(5)})
+        self.assertEqual(links["b"], {"r%02d" % i for i in range(7, 12)})
+        self.assertEqual(len(shown), 11)
         self.assertIn(sample_pair, shown)
-        self.assertEqual({n["id"] for n in visible}, {n["id"] for n in samples + refs[:12]})
+        self.assertEqual({n["id"] for n in visible}, {n["id"] for n in samples + refs[:5] + refs[7:12]})
         self.assertEqual(len({n["id"] for n in visible}), len(visible))
 
     def test_network_reference_ties_zero_and_unmatched_samples(self):
@@ -335,7 +335,7 @@ class CompareTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonnegative"):
             compare.select_network_references(nodes, edges, limit=-1)
         args = compare.parser().parse_args(["--results", "results", "--outdir", "out"])
-        self.assertEqual(args.network_references_per_sample, 10)
+        self.assertEqual(args.network_references_per_sample, 5)
         self.assertEqual(args.top_references_per_sample, 0)
 
     def test_helper_filters_existing_network_and_can_restore_all_without_ani(self):
@@ -362,16 +362,16 @@ class CompareTests(unittest.TestCase):
             self.assertEqual(result[0]["nearest_reference"], "r00")
             _, saved = compare.read_csv(self.out / "network_nodes.csv")
             self.assertEqual(len(saved), 14)
-            self.assertEqual(sum(n["displayed"] == "True" for n in saved), 11)
+            self.assertEqual(sum(n["displayed"] == "True" for n in saved), 6)
             for n in saved:
                 self.assertEqual(float(n["x"]), positions[n["id"]]["x"])
                 self.assertEqual(float(n["y"]), positions[n["id"]]["y"])
             _, shown = compare.read_csv(self.out / "network_edges.csv")
-            self.assertEqual(len(shown), 10)
+            self.assertEqual(len(shown), 5)
             page = (self.out / "ani_network.html").read_text()
-            self.assertEqual(page.count('<circle tabindex='), 11)
+            self.assertEqual(page.count('<circle tabindex='), 6)
             self.assertNotIn('data-id="r12"', page)
-            self.assertIn('up to 10 reference connections', page)
+            self.assertIn('up to 5 reference connections', page)
             self.assertIn('Strain: PAO1 &lt;special&gt;', page)
             self.assertIn('aria-label="Genome details"', page)
             self.assertIn("e.target.closest('circle')", page)

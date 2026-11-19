@@ -17,8 +17,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--analysis-dir", type=Path, required=True, help="Existing spraynpray_compare output folder")
     parser.add_argument("--summary-only", action="store_true", help="Only write nearest_references.csv; no plotting dependencies needed")
-    parser.add_argument("--network-references-per-sample", type=int, default=10,
-                        help="Top ANI reference connections shown per sample (default: 10); 0 shows all reference nodes")
+    parser.add_argument("--network-references-per-sample", type=int, default=5,
+                        help="Top ANI reference connections shown per sample (default: 5); 0 shows all reference nodes")
     parser.add_argument("--assembly-info", type=Path, help="Optional NCBI assembly TSV to add reference strain/isolate details to older results")
     args = parser.parse_args(argv)
     if args.network_references_per_sample < 0:

@@ -27,7 +27,7 @@ import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 LOG = logging.getLogger("spraynpray_compare")
 ACCESSION = re.compile(r"GC[AF]_\d+\.\d+")
 ENTRY = re.compile(
@@ -711,7 +711,7 @@ def display_edges(nodes, edges, neighbors):
     return [edges[index] for index in sorted(selected)]
 
 
-def select_network_references(nodes, edges, limit=10, neighbors=5):
+def select_network_references(nodes, edges, limit=5, neighbors=5):
     """Keep each sample's top ANI references and sparse sample/sample links.
 
     Reference selection is per sample, so a shared reference selected by
@@ -840,7 +840,7 @@ def draw_network(nodes, edges, positions, diagnostics, args):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    limit = getattr(args, "network_references_per_sample", 10)
+    limit = getattr(args, "network_references_per_sample", 5)
     visible, shown = select_network_references(nodes, edges, limit, args.neighbors)
     visible_ids = {n["id"] for n in visible}
     for node in nodes:
@@ -936,7 +936,7 @@ function select(id){document.getElementById('info').textContent='Select a genome
     (args.outdir / "ani_network.html").write_text(page)
 
 
-def refresh_existing_analysis(directory, summary_only=False, network_references_per_sample=10, assembly_info=None):
+def refresh_existing_analysis(directory, summary_only=False, network_references_per_sample=5, assembly_info=None):
     """Add nearest-reference output and redraw saved coordinates without any ANI."""
     directory = Path(directory).resolve()
     _, nodes = read_csv(directory / "network_nodes.csv")
@@ -1005,7 +1005,7 @@ def parser():
     p.add_argument("--frag-len", type=int, default=3000, help="FastANI fragment length")
     p.add_argument("--min-af", type=float, default=0.5, help="Minimum aligned fraction required in both directions for plotted ANI")
     p.add_argument("--min-ani", type=float, default=80, help="Minimum mean ANI used for the map")
-    p.add_argument("--network-references-per-sample", type=int, default=10,
+    p.add_argument("--network-references-per-sample", type=int, default=5,
                    help="Display each sample's top N references ranked by accepted genome ANI; 0 includes all reference nodes")
     p.add_argument("--neighbors", type=int, default=5, help="Nearest sample/sample edges plus spanning forest (all node types when reference limit is 0); 0 shows all such pairs")
     p.add_argument("--fastani-results", type=Path, help="Reuse existing five-column FastANI output explicitly")

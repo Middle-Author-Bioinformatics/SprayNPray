@@ -156,16 +156,16 @@ components have no ANI meaning.** Every input sample remains visible, including
 samples with no accepted comparisons. This map is not a phylogenetic tree and
 carries no branch-length or ancestry inference.
 
-By default, `--network-references-per-sample 10` shows each sample's **10 closest
+By default, `--network-references-per-sample 5` shows each sample's **5 closest
 references ranked by accepted mean reciprocal genome ANI**. Fewer are shown
 if fewer pass the ANI/aligned-fraction thresholds. Ties are resolved by higher
 minimum reciprocal aligned fraction, then accession. This is independent of
 protein hit frequency and approximate 2D distance.
 
 Only the union of those selected references appears as gray nodes; a reference
-shared by several samples appears once. Each sample has at most 10 reference
+shared by several samples appears once. Each sample has at most 5 reference
 connections, even if additional references were selected by another sample.
-Reference/reference lines are hidden. The union can exceed 10 references for
+Reference/reference lines are hidden. The union can exceed 5 references for
 a cohort. Black sample nodes retain sample/sample connections using the five
 nearest accepted sample neighbors plus a minimum spanning forest; `--neighbors 0`
 shows all accepted sample/sample pairs. These sample links do not add extra
@@ -220,7 +220,7 @@ python spraynpray_helper.py \
   --assembly-info /path/to/ncbi_assembly_info.tsv
 ```
 
-This enriches exact versioned reference accessions and updates the top-10 map
+This enriches exact versioned reference accessions and updates the top-5 map
 and click panel without downloads, DIAMOND or ANI. Gzip-compressed assembly TSVs
 are supported. Explicit `strain=...` and isolate fields are used; strain names
 are not guessed from sample filenames or organism-name suffixes. Original
@@ -258,7 +258,7 @@ nearest-reference result and plot outputs/plot metadata. It runs no gene
 prediction, alignment, reference download or ANI calculation. Use
 `--summary-only` for just the concise CSV without plotting dependencies.
 
-The helper also applies the default top-10 ANI reference display to existing
+The helper also applies the default top-5 ANI reference display to existing
 results. Pass `--network-references-per-sample 20` to change it or `0` to restore
 all references. Saved coordinates for hidden references are retained, so a
 later helper run can expand the display without repeating ANI or embedding.
@@ -295,6 +295,11 @@ sample-focused mode are also cached independently, so an interruption during
 the second job does not repeat the completed first job.
 `--fastani-results` can explicitly reuse a five-column FastANI output whose
 genome fields use the original absolute input paths, staged paths or node IDs.
+
+For a marker-gene phylogeny of the samples and their five closest accepted ANI
+references, see [README_phylogeny.md](README_phylogeny.md) and
+`spraynpray_phylogeny.py`. It reuses the existing local FASTAs and includes
+shared references once.
 
 ## Validation and sources
 

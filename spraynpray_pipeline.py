@@ -116,7 +116,7 @@ def parser():
     p.add_argument("--frag-len", type=int, default=3000)
     p.add_argument("--min-af", type=float, default=.5)
     p.add_argument("--min-ani", type=float, default=80)
-    p.add_argument("--network-references-per-sample", type=int, default=10,
+    p.add_argument("--network-references-per-sample", type=int, default=5,
                    help="Top references shown per sample ranked by accepted genome ANI; 0 shows all reference nodes")
     p.add_argument("--neighbors", type=int, default=5)
     p.add_argument("--ani-scope", choices=("samples", "all"), default="samples")
