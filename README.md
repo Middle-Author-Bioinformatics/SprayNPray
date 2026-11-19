@@ -10,6 +10,7 @@ The original `spray-and-pray.py` workflow and examples are retained below.
 | Start with a folder of genome FASTAs and run every step | `spraynpray_pipeline.py` | [Genome-folder pipeline](README_pipeline.md) |
 | Profile a single assembly | `spraynpray_v2.py` | [V2 inputs, inference and outputs](README_v2.md) |
 | Compare existing sample results and genomes | `spraynpray_compare.py` | [Cohort summary and ANI map](README_compare.md) |
+| Build a GToTree phylogeny from samples and their closest references | `spraynpray_phylogeny.py` | [Phylogeny helper](README_phylogeny.md) |
 | Refresh nearest-reference summaries and labels without rerunning ANI | `spraynpray_helper.py` | [Existing-result helper](README_compare.md#concise-nearest-reference-result-and-helper) |
 
 ## Rapid and simple taxonomic profiling of genome and metagenome contigs 
@@ -108,8 +109,8 @@ the total CPU budget; `--sample-jobs 4 --threads 32` permits four concurrent
 V2 sample runs with eight DIAMOND threads each. See the
 [pipeline guide](README_pipeline.md) for memory considerations and all options.
 
-The map defaults to each sample's **10 closest references by accepted genome
-ANI**, with up to 10 reference connections per sample. Shared references appear
+The map defaults to each sample's **5 closest references by accepted genome
+ANI**, with up to 5 reference connections per sample. Shared references appear
 once; every input sample remains visible. Change the display with
 `--network-references-per-sample 20`, or use `0` for all reference nodes. This
 controls the plot only and preserves the full ANI results and closest-reference
@@ -176,10 +177,32 @@ For older outputs, add `--assembly-info /path/to/ncbi_assembly_info.tsv` to
 enrich reference strain/isolate details in the click panel. New wrapper runs
 pass this metadata automatically.
 
-The helper also applies the top-10 reference display without recalculating ANI;
+The helper also applies the top-5 reference display without recalculating ANI;
 pass `--network-references-per-sample 0` to restore all reference nodes.
 Add `--summary-only` to the helper for just `nearest_references.csv`.
 Each script documents its flags with `--help`.
+
+## Build a phylogenomic tree
+
+The optional [GToTree helper](README_phylogeny.md) uses every input sample and
+its **five closest accepted ANI references**, including shared references once:
+
+```bash
+# Run in an environment containing GToTree.
+python spraynpray_phylogeny.py \
+  --analysis-dir /path/to/cohort_ani \
+  --outdir /path/to/cohort_phylogeny \
+  --hmm-set Gammaproteobacteria \
+  --references-per-sample 5 \
+  --threads 24
+```
+
+Use `Bacteria` (the default) or another marker set if Gammaproteobacteria does
+not fit the full cohort. The helper reuses local genome FASTAs and runs no ANI
+or DIAMOND. It keeps accession/organism/strain labels when available, retains
+GToTree's alignment and reports, and records genomes excluded by its filtering.
+See the [phylogeny guide](README_phylogeny.md) for installation, nucleotide mode,
+reference limits, preparation-only mode and completed-tree reuse.
 
 ## Original SprayNPray workflow
 

@@ -54,7 +54,7 @@ local genomes using `--reference-dir`; `--no-download` and
 `--allow-missing-references` are passed through. The optional
 `--top-references-per-sample N` limits references for a smaller first run.
 
-The map shows up to **10 closest reference connections per sample**, ranked by
+The map shows up to **5 closest reference connections per sample**, ranked by
 accepted reciprocal genome ANI. Shared references are drawn once; all input
 samples remain visible. `--network-references-per-sample N` changes this display
 limit; `0` restores all reference nodes. This does not restrict ANI computation,
@@ -110,3 +110,8 @@ python spraynpray_helper.py --analysis-dir /path/to/existing/cohort_ani
 This updates the concise summary and reference labels without recalculating ANI.
 Nearest-reference and graph interpretation are documented in
 [README_compare.md](README_compare.md).
+
+After the cohort stage, the optional [GToTree helper](README_phylogeny.md) can
+build a marker-gene phylogeny from the input samples and their five closest
+accepted ANI references. Run it separately in a GToTree environment, pointing
+`--analysis-dir` at the wrapper's `cohort_ani` subfolder.
