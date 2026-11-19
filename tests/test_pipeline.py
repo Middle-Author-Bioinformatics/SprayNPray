@@ -45,6 +45,11 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(command[command.index("--threads") + 1], "16")
         self.assertEqual(command[command.index("--top-references-per-sample") + 1], "3")
         self.assertIn("--no-download", command)
+        self.assertEqual(command[command.index("--assembly-info") + 1], str(Path("metadata.tsv").resolve()))
+        self.assertEqual(command[command.index("--network-references-per-sample") + 1], "10")
+        args.network_references_per_sample = 0
+        command = pipeline.compare_command(args)
+        self.assertEqual(command[command.index("--network-references-per-sample") + 1], "0")
 
     @unittest.skipUnless(all(shutil.which(t) for t in ("prodigal", "diamond", "fastANI")), "requires all three real tools")
     def test_real_pipeline_two_samples_complete_and_resume(self):
