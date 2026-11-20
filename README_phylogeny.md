@@ -94,8 +94,10 @@ the network; the display's separate control is
 `--prepare-only` stages the selected FASTAs and writes a GToTree command script
 without requiring GToTree to be installed or running it. Repeating the normal
 helper command reuses a compatible completed tree whose checksum still matches.
-New inputs/settings or `--force` create a new attempt under `runs/`, retaining
-previous attempt outputs and logs. Use `--force` after upgrading GToTree or
+Use `--force` to deliberately create a new attempt under `runs/`, retaining
+previous outputs and logs. If existing trees fail recovery checks or settings
+have changed, a normal run stops and explains the mismatch rather than
+silently starting another long analysis. Use `--force` after upgrading GToTree or
 replacing a named built-in marker set: these installed resource versions are
 not automatically fingerprinted. Custom HMM files are checksummed.
 
@@ -106,6 +108,11 @@ GToTree renames its final tree to the output-directory basename, for example
 for the intermediate `Aligned_SCGs*.tre` names and could incorrectly mark a
 successful native run as failed. The corrected helper recognizes both naming
 styles and checks existing attempts before launching another run.
+
+Recovery is now **artifact-first**: it inspects saved selection records and
+native outputs before staging any DNA, rewriting input files, or checking for
+the GToTree executable. `--reuse-only` works in the SprayNPray environment; a
+GToTree environment is needed only to launch a new analysis.
 
 After updating the code, repeat your original settings with **the same output
 folder** and add `--reuse-only` to guarantee GToTree will not be launched:
@@ -140,7 +147,26 @@ incompatible artifact and print the absolute output path being checked. Confirm
 that `--outdir` points to the folder holding the original completed attempt;
 a similarly named folder elsewhere will not contain that run.
 Normal runs also attempt this recovery automatically; `--force` deliberately
-bypasses it.
+bypasses it. Recovery failures preserve saved selection/input files. If there
+are no native attempts under the requested output folder, the helper reports
+nearby `.tre` files under the comparison/output parents to help locate the
+original run. `--tree /absolute/path/to/the_finished.tre` with `--reuse-only`
+can identify a particular native tree explicitly.
+
+When helper attempt manifests are missing, the helper also inspects native
+attempt directories. It requires the final completion/runtime log, a nonempty
+alignment, compatible normalized genome labels and submitted/retained counts
+matching the requested genomes and final tree. This route reports the existing
+artifact and writes `recovered_native_manifest.json` plus `tree_membership.csv`.
+It explicitly records `input_fingerprints_verified: false`: without an original
+attempt manifest, original DNA fingerprints and marker/tree settings cannot be
+proven from the tree/alignment alone. It does not manufacture a verified cache
+signature. Explicitly incompatible attempt manifests still block recovery;
+missing provenance never overrides a recorded mismatch.
+
+The helper prints its version and the resolved output folder at startup.
+`python spraynpray_phylogeny.py --version` can confirm the installed revision
+(current helper interface: `0.5.0`).
 
 ## Outputs
 
@@ -155,6 +181,7 @@ bypasses it.
 | `runs/attempt_NNN/` | GToTree alignment, marker/filtering reports, citations and other outputs. |
 | `tree_membership.csv` | Whether each submitted genome appears in the final tree; filtered genomes are explicitly listed. |
 | `gtotree_attempt_NNN.log` | Full stdout/stderr for that attempt. |
+| `recovered_native_manifest.json` | Artifact-only recovery record when original helper attempt provenance is unavailable. |
 | `run_manifest.json`, `selection_manifest.json`, `runs/*.manifest.json` | Settings, genome selection, completion/cache status and attempt history. |
 
 Open the Newick tree in a tree viewer such as FigTree or iTOL. Cite GToTree and

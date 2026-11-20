@@ -20,6 +20,7 @@ from pathlib import Path
 
 import spraynpray_compare as compare
 
+VERSION = "0.5.0"
 LOG = logging.getLogger("spraynpray_phylogeny")
 
 
@@ -119,7 +120,7 @@ def label_for(node):
     return normalize_tree_label(re.sub(r"[^A-Za-z0-9_.-]+", "_", "__".join(p for p in parts if p)).strip("_"))
 
 
-def prepare_inputs(args):
+def load_selection(args):
     _, nodes = compare.read_csv(args.analysis_dir / "network_nodes.csv")
     _, pairs = compare.read_csv(args.analysis_dir / "ani_pairs.csv")
     cache = compare.read_json(args.analysis_dir / "work" / "ani_cache.json")
@@ -130,6 +131,11 @@ def prepare_inputs(args):
     selected, rankings = select_genomes(nodes, pairs, args.references_per_sample)
     if len(selected) < 3:
         raise ValueError("At least three selected genomes are required for this phylogeny helper")
+    return selected, rankings
+
+
+def prepare_inputs(args):
+    selected, rankings = load_selection(args)
     # Resolve all sources before writing inputs, so missing genomes are never silently skipped.
     sources = [locate_fasta(n, args.analysis_dir, args.genomes, args.reference_dir) for n in selected]
     inputs = args.outdir / "genomes"
@@ -176,10 +182,11 @@ def report_tree_membership(tree, records, outdir):
     return missing
 
 
-def find_tree(output):
+def find_tree(output, explicit=None):
     """GToTree renames the final tree to the output directory's basename."""
-    for name in (output.name + ".tre", "Aligned_SCGs_mod_names.tre", "Aligned_SCGs.tre"):
-        path = output / name
+    paths = [explicit] if explicit is not None else [output / name for name in
+             (output.name + ".tre", "Aligned_SCGs_mod_names.tre", "Aligned_SCGs.tre")]
+    for path in paths:
         if path.is_file():
             text = path.read_text().strip()
             if "(" in text and text.endswith(";"):
@@ -187,13 +194,13 @@ def find_tree(output):
     return None
 
 
-def completed_attempt(output, records, reasons=None):
+def completed_attempt(output, records, reasons=None, tree_path=None):
     """Require native completion, an alignment, and compatible final leaf labels."""
     def rejected(reason):
         if reasons is not None:
             reasons.append(reason)
         return None
-    tree = find_tree(output)
+    tree = find_tree(output, tree_path)
     log = output / "gtotree-runlog.txt"
     if tree is None:
         return rejected("no nonempty final Newick tree found")
@@ -224,7 +231,7 @@ def completed_attempt(output, records, reasons=None):
     return tree
 
 
-def recover_completed_attempt(outdir, signature, records):
+def recover_completed_attempt(outdir, signature, records, wanted_tree=None):
     """Adopt a completed native run that an earlier helper could not recognize."""
     paths = [outdir / "run_manifest.json"] + sorted((outdir / "runs").glob("attempt_*.manifest.json"), reverse=True)
     checked = set()
@@ -256,6 +263,8 @@ def recover_completed_attempt(outdir, signature, records):
         if tree is None:
             LOG.warning("Cannot reuse %s: %s", output, "; ".join(reasons))
             continue
+        if wanted_tree is not None and tree.resolve() != wanted_tree:
+            continue
         if manifest.get("tree_sha256") and compare.sha256(tree) != manifest["tree_sha256"]:
             LOG.warning("Cannot reuse %s: tree checksum differs from the completed manifest", output)
             continue
@@ -269,8 +278,106 @@ def recover_completed_attempt(outdir, signature, records):
     return None
 
 
+
+def recovery_records(args):
+    """Inspect saved selection without reopening genomes or rewriting any inputs."""
+    selected, _ = load_selection(args)
+    path = args.outdir / "selected_genomes.csv"
+    saved = {}
+    if path.is_file():
+        _, rows = compare.read_csv(path)
+        saved = {r["id"]: r for r in rows}
+        if len(saved) != len(rows) or set(saved) != {n["id"] for n in selected}:
+            raise ValueError("Saved genome selection differs from the requested cohort/reference limit")
+    records = []
+    for node in selected:
+        row = saved.get(node["id"], {})
+        if row.get("kind", node["kind"]) != node["kind"]:
+            raise ValueError("Saved sample/reference kind differs for " + node["id"])
+        if node.get("ani_sha256") and row.get("sha256") and node["ani_sha256"] != row["sha256"]:
+            raise ValueError("Saved genome fingerprint differs from ANI for " + node["id"])
+        records.append(dict(node, tree_label=row.get("tree_label") or label_for(node),
+                            sha256=row.get("sha256") or node.get("ani_sha256") or ""))
+    return records
+
+
+def run_signature(args, records):
+    hmm = Path(args.hmm_set).expanduser()
+    return dict(genomes=[dict(id=r["id"], label=r["tree_label"], sha256=r["sha256"]) for r in records],
+                hmm_set=str(hmm.resolve()) if hmm.is_file() else args.hmm_set,
+                hmm_sha256=compare.sha256(hmm) if hmm.is_file() else None,
+                nucleotide=args.nucleotide, tree_program=args.tree_program, executable=args.gtotree)
+
+
+def native_attempts(outdir, explicit_tree=None):
+    if explicit_tree is not None:
+        return [explicit_tree.parent]
+    paths = sorted((outdir / "runs").glob("attempt_*"), reverse=True)
+    return [p for p in paths if p.is_dir()] + ([outdir] if find_tree(outdir) else [])
+
+
+def recover_native_outputs(args, signature, records):
+    """Inspect native outputs even when no helper attempt manifest survived.
+
+    Without an attempt-bound signature we report the existing artifact, never
+    manufacture a sequence/settings-verified cache entry for it.
+    """
+    paths = [args.outdir / "run_manifest.json"] + list((args.outdir / "runs").glob("attempt_*.manifest.json"))
+    if any(compare.read_json(path).get("signature") for path in paths):
+        return None  # an explicitly incompatible recorded run must not be bypassed
+    attempts = native_attempts(args.outdir, args.tree)
+    LOG.info("No attempt-bound fingerprints found; inspecting %s native output directories under %s", len(attempts), args.outdir)
+    for output in attempts:
+        reasons = []
+        tree = completed_attempt(output, records, reasons, args.tree)
+        if tree is None:
+            LOG.warning("Cannot recover native output %s: %s", output, "; ".join(reasons))
+            continue
+        if args.tree is not None and tree.resolve() != args.tree:
+            LOG.warning("Native final tree %s differs from explicitly requested %s", tree, args.tree)
+            continue
+        log = (output / "gtotree-runlog.txt").read_text()
+        counts = re.search(r"Overall,\s*(\d+) genomes of the input (\d+) were retained", log)
+        all_retained = re.search(r"All (\d+) input genomes were retained", log)
+        retained, submitted = (tuple(map(int, counts.groups())) if counts else
+                              (int(all_retained[1]), int(all_retained[1])) if all_retained else (None, None))
+        leaves = set(re.findall(r"[,(]\s*([A-Za-z0-9_.-]+)\s*(?=[:),;])", tree.read_text()))
+        if submitted != len(records) or retained != len(leaves) or retained < 3:
+            LOG.warning("Cannot recover native output %s: native submitted/retained counts %s/%s do not match requested %s genomes and %s tree leaves",
+                        output, submitted, retained, len(records), len(leaves))
+            continue
+        excluded = report_tree_membership(tree, records, args.outdir)
+        manifest = dict(status="recovered_native", tree=str(tree.resolve()), tree_sha256=compare.sha256(tree),
+                        verification="native_completion_alignment_and_genome_labels",
+                        input_fingerprints_verified=False, requested_signature=signature, excluded_genomes=excluded)
+        compare.write_json(args.outdir / "recovered_native_manifest.json", manifest)
+        LOG.warning("Native tree recovered by completion/alignment/label checks; original genome fingerprints and tree settings cannot be verified without an attempt manifest")
+        LOG.info("Existing tree: %s", tree.resolve())
+        return manifest
+    return None
+
+
+def explain_missing_outputs(args):
+    attempts = native_attempts(args.outdir, args.tree)
+    LOG.error("Searched %s native output directories and helper manifests under %s", len(attempts), args.outdir)
+    if not attempts:
+        roots = {args.outdir.parent, args.analysis_dir.parent}
+        found = set()
+        for root in roots:
+            for tree in root.glob("*phylogen*/runs/attempt_*/*.tre"):
+                if tree.is_file():
+                    found.add(str(tree.resolve()))
+            for tree in root.glob("runs/attempt_*/*.tre"):
+                if tree.is_file():
+                    found.add(str(tree.resolve()))
+        for tree in sorted(found)[:10]:
+            LOG.error("Tree found nearby: %s (use the containing phylogeny folder as --outdir)", tree)
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--version", action="version", version=VERSION)
+    p.add_argument("--tree", type=Path, help="Explicit final .tre file for --reuse-only when recovering native outputs")
     p.add_argument("--analysis-dir", type=Path, required=True, help="Completed spraynpray_compare output folder (cohort_ani)")
     p.add_argument("--outdir", type=Path, required=True, help="Separate phylogeny output folder; use a path without whitespace")
     p.add_argument("--references-per-sample", type=int, default=5, help="Top accepted ANI references per sample; 0 includes all accepted sample references")
@@ -291,7 +398,7 @@ def parser():
 def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
-    for key in ("analysis_dir", "outdir", "genomes", "reference_dir", "assembly_info"):
+    for key in ("analysis_dir", "outdir", "genomes", "reference_dir", "assembly_info", "tree"):
         value = getattr(args, key)
         if value is not None:
             setattr(args, key, value.resolve())
@@ -308,41 +415,49 @@ def main(argv=None):
     for folder in (args.genomes, args.reference_dir):
         if folder is not None and not folder.is_dir():
             p.error("Genome folders must exist")
-    selection_path = args.outdir / "selection_manifest.json"
-    if (args.outdir.exists() and any(args.outdir.iterdir())
-            and compare.read_json(selection_path).get("tool") != "spraynpray_phylogeny"):
-        p.error("Output directory is not a recognized phylogeny-helper run; choose a new folder")
-    args.outdir.mkdir(parents=True, exist_ok=True)
-    compare.write_json(selection_path, dict(tool="spraynpray_phylogeny", status="preparing"))
+    if args.tree is not None and not args.reuse_only:
+        p.error("--tree is only used with --reuse-only")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    LOG.info("SprayNPray phylogeny helper %s; output folder: %s", VERSION, args.outdir)
+    selection_path = args.outdir / "selection_manifest.json"
     manifest_path = args.outdir / "run_manifest.json"
     try:
-        records = prepare_inputs(args)
-        hmm_path = Path(args.hmm_set).expanduser()
-        if hmm_path.is_file():
-            args.hmm_set = str(hmm_path.resolve())
-        signature = dict(genomes=[dict(id=r["id"], label=r["tree_label"], sha256=r["sha256"]) for r in records],
-                         hmm_set=args.hmm_set, hmm_sha256=compare.sha256(hmm_path) if hmm_path.is_file() else None,
-                         nucleotide=args.nucleotide, tree_program=args.tree_program, executable=args.gtotree)
-        previous = compare.read_json(manifest_path)
-        tree = args.outdir / previous.get("tree", "missing")
-        if (not args.prepare_only and not args.force and previous.get("status") == "complete"
-                and compatible_signatures(previous.get("signature"), signature) and tree.is_file()
-                and compare.sha256(tree) == previous.get("tree_sha256")):
-            report_tree_membership(tree, records, args.outdir)
-            compare.write_json(selection_path, dict(tool="spraynpray_phylogeny", status="reused",
-                               signature=signature, command=previous.get("command")))
-            LOG.info("Reusing completed tree: %s", tree)
-            return 0
-        if not args.prepare_only and not args.force:
-            recovered = recover_completed_attempt(args.outdir, signature, records)
+        # Recovery precedes ownership markers, staging, and executable checks.
+        # Failed recovery leaves saved inputs and manifests unchanged.
+        if not args.force and not args.prepare_only:
+            records = recovery_records(args)
+            signature = run_signature(args, records)
+            previous = compare.read_json(manifest_path)
+            tree = args.outdir / previous.get("tree", "missing")
+            if (previous.get("status") == "complete" and compatible_signatures(previous.get("signature"), signature)
+                    and tree.is_file() and compare.sha256(tree) == previous.get("tree_sha256")):
+                if args.tree is None or tree.resolve() == args.tree:
+                    report_tree_membership(tree, records, args.outdir)
+                    LOG.info("Reusing completed tree: %s", tree)
+                    return 0
+            recovered = recover_completed_attempt(args.outdir, signature, records, args.tree)
             if recovered:
-                compare.write_json(selection_path, dict(tool="spraynpray_phylogeny", status="recovered",
-                                   signature=signature, command=recovered["command"]))
                 LOG.info("Recovered completed GToTree output without rerunning: %s", args.outdir / recovered["tree"])
                 return 0
-        if args.reuse_only:
-            raise ValueError("No compatible completed tree could be verified under %s; --reuse-only prevents a new GToTree run" % args.outdir)
+            if recover_native_outputs(args, signature, records):
+                return 0
+            if args.reuse_only:
+                explain_missing_outputs(args)
+                raise ValueError("No completed tree could be verified; --reuse-only ran no tools and changed no input files")
+            if any(find_tree(output) for output in native_attempts(args.outdir)):
+                raise ValueError("Existing trees were found but recovery checks rejected them. No new run started; inspect the warnings or use --force deliberately")
+        if not args.prepare_only and shutil.which(args.gtotree) is None:
+            raise ValueError("No completed tree was recovered and GToTree is not installed in this environment. No inputs were changed; activate its environment only to start a new tree")
+        if (args.outdir.exists() and any(args.outdir.iterdir())
+                and compare.read_json(selection_path).get("tool") != "spraynpray_phylogeny"):
+            raise ValueError("Output directory is not a recognized phylogeny-helper run; choose a new folder")
+        args.outdir.mkdir(parents=True, exist_ok=True)
+        if not selection_path.is_file():
+            compare.write_json(selection_path, dict(tool="spraynpray_phylogeny", status="preparing"))
+        records = prepare_inputs(args)
+        signature = run_signature(args, records)
+        if Path(args.hmm_set).expanduser().is_file():
+            args.hmm_set = str(Path(args.hmm_set).expanduser().resolve())
         runs = args.outdir / "runs"
         runs.mkdir(exist_ok=True)
         attempt = next(i for i in range(1, 1000000) if not (runs / ("attempt_%03d" % i)).exists())
@@ -362,8 +477,6 @@ def main(argv=None):
         if args.prepare_only:
             LOG.info("Prepared inputs and command: %s", args.outdir / "run_gtotree.sh")
             return 0
-        if shutil.which(args.gtotree) is None:
-            raise ValueError("GToTree not found; activate its conda environment or use --prepare-only")
         log = args.outdir / ("gtotree_attempt_%03d.log" % attempt)
         manifest = dict(status="running", signature=signature, command=command, log=log.name)
         compare.write_json(manifest_path, manifest)
