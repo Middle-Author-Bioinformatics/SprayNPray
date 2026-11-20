@@ -12,6 +12,7 @@ The original `spray-and-pray.py` workflow and examples are retained below.
 | Compare existing sample results and genomes | `spraynpray_compare.py` | [Cohort summary and ANI map](README_compare.md) |
 | Build a GToTree phylogeny from samples and their closest references | `spraynpray_phylogeny.py` | [Phylogeny helper](README_phylogeny.md) |
 | Refresh nearest-reference summaries and labels without rerunning ANI | `spraynpray_helper.py` | [Existing-result helper](README_compare.md#concise-nearest-reference-result-and-helper) |
+| Archive intermediates and share an offline assembly/ANI/tree report | `spraynpray_cleanup.py`, `spraynpray_dashboard.py` | [Cleanup and portable dashboard](README_dashboard.md) |
 
 ## Rapid and simple taxonomic profiling of genome and metagenome contigs 
 #### - Bin validation
