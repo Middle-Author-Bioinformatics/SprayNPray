@@ -2,6 +2,7 @@
 
 import csv
 import gzip
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -168,6 +169,58 @@ class PhylogenyTests(unittest.TestCase):
             (output / "Aligned_SCGs_mod_names.faa").write_text(">unrelated\nACDEFG\n")
             self.assertEqual(phylo.main(self.command("--reuse-only")), 1)
         self.assertFalse((self.out / "runs/attempt_002").exists())
+
+    def test_recovers_original_double_underscore_signature_and_gtotree_collapsed_labels(self):
+        self.write_inputs()
+        self.assertEqual(phylo.main(self.command("--prepare-only")), 0)
+        selection = compare.read_json(self.out / "selection_manifest.json")
+        _, selected = compare.read_csv(self.out / "selected_genomes.csv")
+        old_signature = dict(selection["signature"], genomes=[dict(g, label=g["label"].replace("_", "__", 1))
+                                                            for g in selection["signature"]["genomes"]])
+        original_labels = [g["label"] for g in old_signature["genomes"]]
+        # Execute the exact tr operation used by upstream GToTree, independently
+        # of the helper's normalization code. Keep one marker-filtered genome out.
+        actual = subprocess.run(["tr", "-s", "_"], input="\n".join(original_labels[:-1]),
+                                text=True, capture_output=True, check=True).stdout.splitlines()
+        output = self.out / "runs/attempt_001"
+        tree = self.completed_output(output, actual)
+        compare.write_json(self.out / "run_manifest.json", dict(status="failed", signature=old_signature,
+                           command=selection["command"]))
+        with patch.object(compare, "run_command", side_effect=AssertionError("must not run GToTree")):
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 0)
+        _, membership = compare.read_csv(self.out / "tree_membership.csv")
+        self.assertEqual(sum(r["present_in_tree"] == "True" for r in membership), len(selected)-1)
+        self.assertEqual(membership[0]["tree_label"], actual[0])
+        self.assertTrue(compare.read_json(self.out / "run_manifest.json")["recovered_existing_attempt"])
+        self.assertTrue(tree.is_file())
+
+    def test_normalized_signatures_still_reject_changed_genomes_settings_and_collisions(self):
+        signature = dict(genomes=[dict(id="a", label="sample__a", sha256="original")], hmm_set="Bacteria")
+        normalized = dict(signature, genomes=[dict(id="a", label="sample_a", sha256="original")])
+        self.assertTrue(phylo.compatible_signatures(signature, normalized))
+        changed = dict(normalized, genomes=[dict(id="a", label="sample_a", sha256="changed")])
+        self.assertFalse(phylo.compatible_signatures(signature, changed))
+        self.assertFalse(phylo.compatible_signatures(signature, dict(normalized, hmm_set="Gammaproteobacteria")))
+        self.assertFalse(phylo.compatible_signatures(signature, dict(normalized, genomes=[dict(id="b", label="sample_a", sha256="original")])))
+        labels = ["sample_a", "sample_b", "reference_r"]
+        output = self.base / "collision"
+        self.completed_output(output, labels)
+        records = [dict(tree_label=label) for label in ["sample_a", "sample__a", "reference_r"]]
+        reasons = []
+        self.assertIsNone(phylo.completed_attempt(output, records, reasons))
+        self.assertIn("collide", reasons[0])
+
+    def test_recovery_explains_signature_and_artifact_rejections(self):
+        self.write_inputs()
+        self.assertEqual(phylo.main(self.command("--prepare-only")), 0)
+        selection = compare.read_json(self.out / "selection_manifest.json")
+        compare.write_json(self.out / "run_manifest.json", dict(status="failed", signature=selection["signature"], command=selection["command"]))
+        with self.assertLogs(phylo.LOG, level="WARNING") as captured:
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 1)
+        self.assertIn("no nonempty final Newick tree", "\n".join(captured.output))
+        with self.assertLogs(phylo.LOG, level="WARNING") as captured:
+            self.assertEqual(phylo.main(self.command("--reuse-only", "--hmm-set", "Gammaproteobacteria")), 1)
+        self.assertIn("signature differs in hmm_set", "\n".join(captured.output))
 
     def test_missing_genomes_duplicate_pairs_and_changed_sequences_fail(self):
         self.write_inputs()
