@@ -156,6 +156,68 @@ def report_tree_membership(tree, records, outdir):
     return missing
 
 
+def find_tree(output):
+    """GToTree renames the final tree to the output directory's basename."""
+    for name in (output.name + ".tre", "Aligned_SCGs_mod_names.tre", "Aligned_SCGs.tre"):
+        path = output / name
+        if path.is_file():
+            text = path.read_text().strip()
+            if "(" in text and text.endswith(";"):
+                return path
+    return None
+
+
+def completed_attempt(output, records):
+    """Require native completion, an alignment, and compatible final leaf labels."""
+    tree = find_tree(output)
+    log = output / "gtotree-runlog.txt"
+    if tree is None or not log.is_file():
+        return None
+    text = log.read_text()
+    if "Done!!" not in text or "Total process runtime:" not in text:
+        return None
+    alignment = next((output / name for name in ("Aligned_SCGs_mod_names.faa", "Aligned_SCGs_mod_names.fa",
+                     "Aligned_SCGs.faa", "Aligned_SCGs.fa")
+                     if (output / name).is_file() and (output / name).stat().st_size), None)
+    if alignment is None:
+        return None
+    leaves = set(re.findall(r"[,(]\s*([A-Za-z0-9_.-]+)\s*(?=[:),;])", tree.read_text()))
+    with alignment.open() as handle:
+        headers = {line[1:].strip().split()[0] for line in handle if line.startswith(">") and line[1:].strip()}
+    if not leaves or not leaves.issubset({r["tree_label"] for r in records}) or not leaves.issubset(headers):
+        return None
+    return tree
+
+
+def recover_completed_attempt(outdir, signature, records):
+    """Adopt a completed native run that an earlier helper could not recognize."""
+    paths = [outdir / "run_manifest.json"] + sorted((outdir / "runs").glob("attempt_*.manifest.json"), reverse=True)
+    checked = set()
+    for path in paths:
+        manifest = compare.read_json(path)
+        command = manifest.get("command", [])
+        if manifest.get("signature") != signature or "-o" not in command:
+            continue
+        try:
+            output = (outdir / command[command.index("-o") + 1]).resolve()
+        except (IndexError, TypeError):
+            continue
+        if output in checked or output.parent != (outdir / "runs").resolve():
+            continue
+        checked.add(output)
+        tree = completed_attempt(output, records)
+        if tree is None or (manifest.get("tree_sha256") and compare.sha256(tree) != manifest["tree_sha256"]):
+            continue
+        excluded = report_tree_membership(tree, records, outdir)
+        manifest.update(recovered_from_status=manifest.get("status"), recovered_existing_attempt=True,
+                        status="complete", tree=str(tree.relative_to(outdir)), tree_sha256=compare.sha256(tree),
+                        excluded_genomes=excluded)
+        compare.write_json(outdir / "run_manifest.json", manifest)
+        compare.write_json(output.parent / (output.name + ".manifest.json"), manifest)
+        return manifest
+    return None
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--analysis-dir", type=Path, required=True, help="Completed spraynpray_compare output folder (cohort_ani)")
@@ -170,6 +232,7 @@ def parser():
     p.add_argument("--tree-program", choices=("FastTree", "FastTreeMP", "IQ-TREE"), help="Omit to use GToTree's default tree engine")
     p.add_argument("--nucleotide", action="store_true", help="GToTree -z: build a nucleotide rather than amino-acid marker alignment/tree")
     p.add_argument("--prepare-only", action="store_true", help="Stage genomes and write the GToTree command without running it")
+    p.add_argument("--reuse-only", action="store_true", help="Reuse/recover a compatible completed tree; never launch GToTree")
     p.add_argument("--force", action="store_true", help="Run a new GToTree attempt even if compatible completed outputs exist")
     return p
 
@@ -183,6 +246,8 @@ def main(argv=None):
             setattr(args, key, value.resolve())
     if any(c.isspace() for c in args.hmm_set):
         p.error("Use an HMM set name or path without whitespace for GToTree")
+    if args.reuse_only and (args.force or args.prepare_only):
+        p.error("--reuse-only cannot be combined with --force or --prepare-only")
     if args.threads < 1 or args.references_per_sample < 0:
         p.error("Threads must be positive; reference limit must be nonnegative")
     if not args.analysis_dir.is_dir() or args.analysis_dir == args.outdir or args.outdir in args.analysis_dir.parents:
@@ -218,6 +283,15 @@ def main(argv=None):
                                signature=signature, command=previous.get("command")))
             LOG.info("Reusing completed tree: %s", tree)
             return 0
+        if not args.prepare_only and not args.force:
+            recovered = recover_completed_attempt(args.outdir, signature, records)
+            if recovered:
+                compare.write_json(selection_path, dict(tool="spraynpray_phylogeny", status="recovered",
+                                   signature=signature, command=recovered["command"]))
+                LOG.info("Recovered completed GToTree output without rerunning: %s", args.outdir / recovered["tree"])
+                return 0
+        if args.reuse_only:
+            raise ValueError("No compatible completed tree could be verified; --reuse-only prevents a new GToTree run")
         runs = args.outdir / "runs"
         runs.mkdir(exist_ok=True)
         attempt = next(i for i in range(1, 1000000) if not (runs / ("attempt_%03d" % i)).exists())
@@ -244,10 +318,9 @@ def main(argv=None):
         compare.write_json(manifest_path, manifest)
         try:
             compare.run_command(command, log, cwd=args.outdir)
-            candidates = [args.outdir / output / name for name in ("Aligned_SCGs_mod_names.tre", "Aligned_SCGs.tre")]
-            tree = next((path for path in candidates if path.is_file() and "(" in path.read_text() and path.read_text().strip().endswith(";")), None)
+            tree = completed_attempt(args.outdir / output, records)
             if tree is None:
-                raise ValueError("GToTree did not produce a nonempty Newick tree; inspect " + str(log))
+                raise ValueError("GToTree did not produce a verifiable completed tree/alignment; inspect " + str(log))
             excluded = report_tree_membership(tree, records, args.outdir)
             manifest.update(status="complete", tree=str(tree.relative_to(args.outdir)), tree_sha256=compare.sha256(tree),
                             excluded_genomes=excluded)

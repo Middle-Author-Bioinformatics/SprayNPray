@@ -98,6 +98,37 @@ previous attempt outputs and logs. Use `--force` after upgrading GToTree or
 replacing a named built-in marker set: these installed resource versions are
 not automatically fingerprinted. Custom HMM files are checksummed.
 
+## Recover an already finished GToTree run
+
+GToTree renames its final tree to the output-directory basename, for example
+`runs/attempt_001/attempt_001.tre`. Earlier versions of this helper looked only
+for the intermediate `Aligned_SCGs*.tre` names and could incorrectly mark a
+successful native run as failed. The corrected helper recognizes both naming
+styles and checks existing attempts before launching another run.
+
+After updating the code, repeat your original settings with **the same output
+folder** and add `--reuse-only` to guarantee GToTree will not be launched:
+
+```bash
+python spraynpray_phylogeny.py \
+  --analysis-dir /path/to/cohort_ani \
+  --outdir /path/to/existing/cohort_phylogeny \
+  --hmm-set Gammaproteobacteria \
+  --references-per-sample 5 \
+  --threads 24 \
+  --reuse-only
+```
+
+Recovery requires matching genome/settings signatures in an existing attempt
+manifest, a native GToTree completion log, a nonempty alignment and a final
+tree whose leaves match the submitted labels and alignment. The helper repairs
+the completion manifest and regenerates `tree_membership.csv`; the original
+tree/alignment are preserved. A later incomplete attempt does not prevent
+recovery of an earlier compatible finished one. Missing, partial or incompatible
+outputs produce an error with `--reuse-only`, rather than a new analysis.
+Normal runs also attempt this recovery automatically; `--force` deliberately
+bypasses it.
+
 ## Outputs
 
 | Output | Contents |
@@ -107,7 +138,7 @@ not automatically fingerprinted. Custom HMM files are checksummed.
 | `genomes/`, `genomes.txt` | Staged DNA FASTAs and the GToTree input list. |
 | `labels.tsv` | Headerless GToTree mapping from staged FASTA basenames to informative tree labels. |
 | `run_gtotree.sh` | Exact GToTree command, run from this output directory. |
-| `runs/attempt_NNN/Aligned_SCGs_mod_names.tre` | Informatively labeled Newick tree (the helper prints the actual tree path). |
+| `runs/attempt_NNN/attempt_NNN.tre` | Final informatively labeled Newick tree. Older `Aligned_SCGs*.tre` output names are also recognized. |
 | `runs/attempt_NNN/` | GToTree alignment, marker/filtering reports, citations and other outputs. |
 | `tree_membership.csv` | Whether each submitted genome appears in the final tree; filtered genomes are explicitly listed. |
 | `gtotree_attempt_NNN.log` | Full stdout/stderr for that attempt. |

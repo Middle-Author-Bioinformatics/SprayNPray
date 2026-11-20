@@ -41,6 +41,15 @@ class PhylogenyTests(unittest.TestCase):
     def command(self, *extra):
         return ["--analysis-dir", str(self.analysis), "--outdir", str(self.out)] + list(extra)
 
+    def completed_output(self, output, labels, tree_name=None):
+        output.mkdir(parents=True, exist_ok=True)
+        name = tree_name or output.name + ".tre"
+        tree = output / name
+        tree.write_text("(" + ",".join(label + ":0.1" for label in labels) + ");\n")
+        (output / "Aligned_SCGs_mod_names.faa").write_text("".join(">" + label + "\nACDEFGHIK\n" for label in labels))
+        (output / "gtotree-runlog.txt").write_text("Done!!\nTotal process runtime: 1 hours and 1 minutes.\nHappy Thursday :)\n")
+        return tree
+
     def test_five_reference_selection_is_per_sample_shared_refs_and_ties(self):
         selected, ranking = phylo.select_genomes(self.nodes, self.pairs, 5)
         self.assertEqual(len(ranking), 10)
@@ -84,10 +93,9 @@ class PhylogenyTests(unittest.TestCase):
         def fake(command, log, cwd=None):
             calls.append(command)
             output = cwd / command[command.index("-o") + 1]
-            output.mkdir(parents=True)
             with (cwd / "labels.tsv").open() as handle:
                 labels = [row[1] for row in csv.reader(handle, delimiter="\t")]
-            (output / "Aligned_SCGs_mod_names.tre").write_text("(" + ",".join(label + ":0.1" for label in labels) + ");\n")
+            self.completed_output(output, labels)
             log.write_text("mock GToTree success")
         with patch.object(phylo.shutil, "which", return_value="GToTree"), patch.object(compare, "run_command", side_effect=fake):
             self.assertEqual(phylo.main(self.command("--threads", "4")), 0)
@@ -98,7 +106,7 @@ class PhylogenyTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertIn("-z", calls[-1])
             self.assertIn("IQ-TREE", calls[-1])
-            self.assertTrue((self.out / "runs/attempt_001/Aligned_SCGs_mod_names.tre").is_file())
+            self.assertTrue((self.out / "runs/attempt_001/attempt_001.tre").is_file())
             def empty(command, log, cwd=None):
                 output = cwd / command[command.index("-o") + 1]
                 output.mkdir(parents=True)
@@ -107,7 +115,59 @@ class PhylogenyTests(unittest.TestCase):
                 self.assertEqual(phylo.main(self.command("--force")), 1)
             self.assertEqual(compare.read_json(self.out / "run_manifest.json")["status"], "failed")
             self.assertEqual(phylo.main(self.command()), 0)
-            self.assertTrue((self.out / "runs/attempt_004/Aligned_SCGs_mod_names.tre").is_file())
+            self.assertEqual(compare.read_json(self.out / "run_manifest.json")["tree"], "runs/attempt_001/attempt_001.tre")
+            self.assertEqual(len(calls), 2)  # recover the prior compatible success, no fourth attempt
+            self.assertFalse((self.out / "runs/attempt_004").exists())
+
+    def test_canonical_and_legacy_tree_names_require_completed_matching_outputs(self):
+        labels = ["sample__a", "sample__b", "reference__r"]
+        records = [dict(tree_label=label) for label in labels]
+        for i, name in enumerate(("attempt_001.tre", "Aligned_SCGs_mod_names.tre", "Aligned_SCGs.tre")):
+            output = self.base / ("variant_%s" % i) / "attempt_001"
+            tree = self.completed_output(output, labels, name)
+            self.assertEqual(phylo.completed_attempt(output, records), tree)
+            (output / "gtotree-runlog.txt").write_text("Done!!\n")  # early success banner is insufficient
+            self.assertIsNone(phylo.completed_attempt(output, records))
+
+    def test_recover_old_failed_attempt_even_if_a_later_attempt_is_incomplete(self):
+        self.write_inputs()
+        self.assertEqual(phylo.main(self.command("--prepare-only")), 0)
+        selection = compare.read_json(self.out / "selection_manifest.json")
+        _, selected = compare.read_csv(self.out / "selected_genomes.csv")
+        output = self.out / "runs/attempt_001"
+        tree = self.completed_output(output, [r["tree_label"] for r in selected[:-1]])
+        digest, modified = compare.sha256(tree), tree.stat().st_mtime_ns
+        failed = dict(status="failed", signature=selection["signature"], command=selection["command"], log="gtotree_attempt_001.log")
+        compare.write_json(self.out / "runs/attempt_001.manifest.json", failed)
+        later = dict(failed, status="running", command=["GToTree", "-o", "runs/attempt_002"])
+        compare.write_json(self.out / "run_manifest.json", later)
+        with patch.object(compare, "run_command", side_effect=AssertionError("must not rerun GToTree")):
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 0)
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 0)
+        manifest = compare.read_json(self.out / "run_manifest.json")
+        self.assertEqual(manifest["status"], "complete")
+        self.assertTrue(manifest["recovered_existing_attempt"])
+        self.assertEqual(manifest["tree"], "runs/attempt_001/attempt_001.tre")
+        self.assertEqual(manifest["excluded_genomes"], [selected[-1]["id"]])
+        self.assertEqual((compare.sha256(tree), tree.stat().st_mtime_ns), (digest, modified))
+
+    def test_reuse_only_refuses_missing_incompatible_or_partial_runs(self):
+        self.write_inputs()
+        with patch.object(compare, "run_command", side_effect=AssertionError("must not run")):
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 1)
+            self.assertEqual(phylo.main(self.command("--prepare-only")), 0)
+            selection = compare.read_json(self.out / "selection_manifest.json")
+            _, selected = compare.read_csv(self.out / "selected_genomes.csv")
+            output = self.out / "runs/attempt_001"
+            self.completed_output(output, [r["tree_label"] for r in selected])
+            compare.write_json(self.out / "run_manifest.json", dict(status="failed", signature=selection["signature"], command=selection["command"]))
+            self.assertEqual(phylo.main(self.command("--reuse-only", "--hmm-set", "Gammaproteobacteria")), 1)
+            (output / "gtotree-runlog.txt").write_text("Done!!\n")
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 1)
+            (output / "gtotree-runlog.txt").write_text("Done!!\nTotal process runtime: 1 hours\n")
+            (output / "Aligned_SCGs_mod_names.faa").write_text(">unrelated\nACDEFG\n")
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 1)
+        self.assertFalse((self.out / "runs/attempt_002").exists())
 
     def test_missing_genomes_duplicate_pairs_and_changed_sequences_fail(self):
         self.write_inputs()
