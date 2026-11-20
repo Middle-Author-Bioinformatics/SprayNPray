@@ -103,7 +103,7 @@ class PhylogenyTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(phylo.main(self.command("--threads", "2")), 0)
             self.assertEqual(len(calls), 1)
-            self.assertEqual(phylo.main(self.command("--nucleotide", "--tree-program", "IQ-TREE")), 0)
+            self.assertEqual(phylo.main(self.command("--nucleotide", "--tree-program", "IQ-TREE", "--force")), 0)
             self.assertEqual(len(calls), 2)
             self.assertIn("-z", calls[-1])
             self.assertIn("IQ-TREE", calls[-1])
@@ -222,6 +222,78 @@ class PhylogenyTests(unittest.TestCase):
             self.assertEqual(phylo.main(self.command("--reuse-only", "--hmm-set", "Gammaproteobacteria")), 1)
         self.assertIn("signature differs in hmm_set", "\n".join(captured.output))
 
+    def test_native_191_genome_run_recovers_without_manifests_sources_or_gtotree(self):
+        nodes = [dict(id="sample_%03d" % i, kind="sample") for i in range(39)]
+        nodes += [dict(id="GCF_%09d.1" % i, kind="reference") for i in range(152)]
+        pairs = []
+        for i, sample in enumerate(nodes[:38]):
+            for j in range(5):
+                pairs.append(dict(genome_a=sample["id"], genome_b=nodes[39+(i*5+j)%152]["id"],
+                                  ani_used=99-j/10, min_aligned_fraction=.9, status="accepted"))
+        compare.write_csv(self.analysis / "network_nodes.csv", ["id", "kind"], nodes)
+        compare.write_csv(self.analysis / "ani_pairs.csv", ["genome_a", "genome_b", "ani_used", "min_aligned_fraction", "status"], pairs)
+        output = self.out / "runs/attempt_001"
+        # Model the real output: 39 samples + 152 unique references; one sample filtered.
+        labels = [phylo.label_for(n) for n in nodes if n["id"] != "sample_038"]
+        tree = self.completed_output(output, labels)
+        log = output / "gtotree-runlog.txt"
+        log.write_text("Done!!\nOverall, 190 genomes of the input 191 were retained (see notes below).\n"
+                       "1 genome(s) removed due to having too few hits to the targeted SCGs.\n"
+                       "Total process runtime: 1 hours and 1 minutes.\nHappy Thursday :)\n")
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in output.iterdir()}
+        with patch.object(phylo.shutil, "which", return_value=None), \
+             patch.object(compare, "run_command", side_effect=AssertionError("no GToTree")), \
+             patch.object(compare, "stage_fasta", side_effect=AssertionError("must not restage")):
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 0)
+            self.assertEqual(phylo.main(self.command()), 0)  # normal mode also recovers before executable checks
+        self.assertEqual(before, {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in output.iterdir()})
+        manifest = compare.read_json(self.out / "recovered_native_manifest.json")
+        self.assertEqual(manifest["tree"], str(tree.resolve()))
+        self.assertFalse(manifest["input_fingerprints_verified"])
+        self.assertNotIn("signature", manifest)
+        _, membership = compare.read_csv(self.out / "tree_membership.csv")
+        self.assertEqual(len(membership), 191)
+        self.assertEqual(sum(r["present_in_tree"] == "True" for r in membership), 190)
+        self.assertFalse((self.out / "selection_manifest.json").exists())
+        self.assertFalse((self.out / "genomes").exists())
+        # Explicit selection also handles a renamed tree without requiring a new analysis.
+        custom = tree.with_name("finished_tree.tre")
+        tree.rename(custom)
+        with patch.object(compare, "run_command", side_effect=AssertionError("no GToTree")), \
+             patch.object(phylo.shutil, "which", return_value=None):
+            self.assertEqual(phylo.main(self.command("--reuse-only", "--tree", str(custom))), 0)
+        self.assertEqual(compare.read_json(self.out / "recovered_native_manifest.json")["tree"], str(custom.resolve()))
+
+    def test_reuse_failure_preserves_selection_files_and_reports_nearby_tree(self):
+        self.write_inputs()
+        self.assertEqual(phylo.main(self.command("--prepare-only")), 0)
+        tracked = [self.out / name for name in ("selection_manifest.json", "selected_genomes.csv", "labels.tsv", "genomes.txt")]
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tracked}
+        nearby = self.base / "other_phylogeny/runs/attempt_001/attempt_001.tre"
+        nearby.parent.mkdir(parents=True)
+        nearby.write_text("(a:1,b:1,c:1);")
+        with patch.object(compare, "stage_fasta", side_effect=AssertionError("no restaging")), \
+             patch.object(compare, "run_command", side_effect=AssertionError("no tools")), \
+             self.assertLogs(phylo.LOG, level="INFO") as captured:
+            self.assertEqual(phylo.main(self.command("--reuse-only")), 1)
+        self.assertEqual(before, {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in tracked})
+        self.assertIn(str(nearby.resolve()), "\n".join(captured.output))
+
+    def test_missing_gtotree_does_not_rewrite_inputs_and_existing_rejected_tree_does_not_rerun(self):
+        self.write_inputs()
+        self.assertEqual(phylo.main(self.command("--prepare-only")), 0)
+        selection = self.out / "selection_manifest.json"
+        before = (selection.read_bytes(), selection.stat().st_mtime_ns)
+        with patch.object(phylo.shutil, "which", return_value=None), \
+             patch.object(compare, "stage_fasta", side_effect=AssertionError("no staging")):
+            self.assertEqual(phylo.main(self.command()), 1)
+        self.assertEqual(before, (selection.read_bytes(), selection.stat().st_mtime_ns))
+        output = self.out / "runs/attempt_001"
+        self.completed_output(output, ["unrelated_a", "unrelated_b", "unrelated_c"])
+        with patch.object(compare, "run_command", side_effect=AssertionError("must not start another tree")), \
+             patch.object(phylo.shutil, "which", return_value="GToTree"):
+            self.assertEqual(phylo.main(self.command()), 1)
+
     def test_missing_genomes_duplicate_pairs_and_changed_sequences_fail(self):
         self.write_inputs()
         Path(self.nodes[0]["source_file"]).unlink()
@@ -263,8 +335,7 @@ class PhylogenyTests(unittest.TestCase):
         self.out.mkdir()
         important = self.out / "user-file.txt"
         important.write_text("keep")
-        with self.assertRaises(SystemExit):
-            phylo.main(self.command("--prepare-only"))
+        self.assertEqual(phylo.main(self.command("--prepare-only")), 1)
         self.assertEqual(important.read_text(), "keep")
 
 
