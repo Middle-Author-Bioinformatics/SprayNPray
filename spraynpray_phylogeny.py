@@ -96,11 +96,27 @@ def locate_fasta(node, analysis, genomes=None, reference_dir=None):
     raise ValueError("FASTA unavailable for %s; provide --genomes or --reference-dir with the exact original genomes" % node["id"])
 
 
+
+def normalize_tree_label(label):
+    """Match GToTree's final `tr -s '_'` normalization of safe input labels."""
+    return re.sub(r"_+", "_", label)
+
+
+def compatible_signatures(saved, current):
+    """Only repeated-underscore label changes are equivalent; sequence/settings stay exact."""
+    if not isinstance(saved, dict) or not isinstance(current, dict):
+        return False
+    def normalized(signature):
+        return dict(signature, genomes=[dict(genome, label=normalize_tree_label(genome.get("label", "")))
+                                        for genome in signature.get("genomes", [])])
+    return normalized(saved) == normalized(current)
+
+
 def label_for(node):
     parts = [node["kind"], node["id"]]
     if node["kind"] == "reference":
         parts.extend(node.get(k, "") for k in ("organism", "strain", "isolate"))
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", "__".join(p for p in parts if p)).strip("_")
+    return normalize_tree_label(re.sub(r"[^A-Za-z0-9_.-]+", "_", "__".join(p for p in parts if p)).strip("_"))
 
 
 def prepare_inputs(args):
@@ -145,10 +161,14 @@ def prepare_inputs(args):
 def report_tree_membership(tree, records, outdir):
     # Labels generated here contain only safe unquoted Newick characters.
     leaves = set(re.findall(r"[,(]\s*([A-Za-z0-9_.-]+)\s*(?=[:),;])", tree.read_text()))
-    if not leaves.intersection(r["tree_label"] for r in records):
+    actual_labels = {normalize_tree_label(label): label for label in leaves}
+    requested = [normalize_tree_label(r["tree_label"]) for r in records]
+    if len(set(requested)) != len(requested):
+        raise ValueError("Submitted labels collide after GToTree underscore normalization")
+    if not set(actual_labels).intersection(requested):
         raise ValueError("Tree labels do not match the submitted genome labels")
-    rows = [dict(id=r["id"], kind=r["kind"], tree_label=r["tree_label"],
-                 present_in_tree=r["tree_label"] in leaves) for r in records]
+    rows = [dict(id=r["id"], kind=r["kind"], tree_label=actual_labels.get(label, r["tree_label"]),
+                 present_in_tree=label in actual_labels) for r, label in zip(records, requested)]
     compare.write_csv(outdir / "tree_membership.csv", ["id", "kind", "tree_label", "present_in_tree"], rows)
     missing = [r["id"] for r in rows if not r["present_in_tree"]]
     if missing:
@@ -167,25 +187,40 @@ def find_tree(output):
     return None
 
 
-def completed_attempt(output, records):
+def completed_attempt(output, records, reasons=None):
     """Require native completion, an alignment, and compatible final leaf labels."""
+    def rejected(reason):
+        if reasons is not None:
+            reasons.append(reason)
+        return None
     tree = find_tree(output)
     log = output / "gtotree-runlog.txt"
-    if tree is None or not log.is_file():
-        return None
+    if tree is None:
+        return rejected("no nonempty final Newick tree found")
+    if not log.is_file():
+        return rejected("native gtotree-runlog.txt is missing")
     text = log.read_text()
     if "Done!!" not in text or "Total process runtime:" not in text:
-        return None
+        return rejected("native log lacks the final completion/runtime markers")
     alignment = next((output / name for name in ("Aligned_SCGs_mod_names.faa", "Aligned_SCGs_mod_names.fa",
                      "Aligned_SCGs.faa", "Aligned_SCGs.fa")
                      if (output / name).is_file() and (output / name).stat().st_size), None)
     if alignment is None:
-        return None
+        return rejected("nonempty marker alignment is missing")
     leaves = set(re.findall(r"[,(]\s*([A-Za-z0-9_.-]+)\s*(?=[:),;])", tree.read_text()))
     with alignment.open() as handle:
         headers = {line[1:].strip().split()[0] for line in handle if line.startswith(">") and line[1:].strip()}
-    if not leaves or not leaves.issubset({r["tree_label"] for r in records}) or not leaves.issubset(headers):
-        return None
+    expected = {normalize_tree_label(r["tree_label"]) for r in records}
+    normalized_leaves = {normalize_tree_label(label) for label in leaves}
+    normalized_headers = {normalize_tree_label(label) for label in headers}
+    if len(expected) != len(records):
+        return rejected("submitted labels collide after GToTree normalization")
+    if not normalized_leaves:
+        return rejected("no leaf labels could be read from the tree")
+    if not normalized_leaves.issubset(expected):
+        return rejected("unrecognized tree labels: " + ", ".join(sorted(normalized_leaves - expected)[:3]))
+    if not normalized_leaves.issubset(normalized_headers):
+        return rejected("tree labels absent from alignment: " + ", ".join(sorted(normalized_leaves - normalized_headers)[:3]))
     return tree
 
 
@@ -196,17 +231,33 @@ def recover_completed_attempt(outdir, signature, records):
     for path in paths:
         manifest = compare.read_json(path)
         command = manifest.get("command", [])
-        if manifest.get("signature") != signature or "-o" not in command:
+        if not path.is_file():
+            continue
+        if not compatible_signatures(manifest.get("signature"), signature):
+            fields = sorted(k for k in set(manifest.get("signature", {}) or {}) | set(signature)
+                            if (manifest.get("signature", {}) or {}).get(k) != signature.get(k))
+            LOG.warning("Cannot reuse %s: signature differs in %s", path, ", ".join(fields) or "missing signature")
+            continue
+        if "-o" not in command:
+            LOG.warning("Cannot reuse %s: no recorded GToTree output argument", path)
             continue
         try:
             output = (outdir / command[command.index("-o") + 1]).resolve()
         except (IndexError, TypeError):
             continue
-        if output in checked or output.parent != (outdir / "runs").resolve():
+        if output in checked:
+            continue
+        if output.parent != (outdir / "runs").resolve():
+            LOG.warning("Cannot reuse %s: recorded output %s is outside %s", path, output, outdir / "runs")
             continue
         checked.add(output)
-        tree = completed_attempt(output, records)
-        if tree is None or (manifest.get("tree_sha256") and compare.sha256(tree) != manifest["tree_sha256"]):
+        reasons = []
+        tree = completed_attempt(output, records, reasons)
+        if tree is None:
+            LOG.warning("Cannot reuse %s: %s", output, "; ".join(reasons))
+            continue
+        if manifest.get("tree_sha256") and compare.sha256(tree) != manifest["tree_sha256"]:
+            LOG.warning("Cannot reuse %s: tree checksum differs from the completed manifest", output)
             continue
         excluded = report_tree_membership(tree, records, outdir)
         manifest.update(recovered_from_status=manifest.get("status"), recovered_existing_attempt=True,
@@ -276,7 +327,7 @@ def main(argv=None):
         previous = compare.read_json(manifest_path)
         tree = args.outdir / previous.get("tree", "missing")
         if (not args.prepare_only and not args.force and previous.get("status") == "complete"
-                and previous.get("signature") == signature and tree.is_file()
+                and compatible_signatures(previous.get("signature"), signature) and tree.is_file()
                 and compare.sha256(tree) == previous.get("tree_sha256")):
             report_tree_membership(tree, records, args.outdir)
             compare.write_json(selection_path, dict(tool="spraynpray_phylogeny", status="reused",
@@ -291,7 +342,7 @@ def main(argv=None):
                 LOG.info("Recovered completed GToTree output without rerunning: %s", args.outdir / recovered["tree"])
                 return 0
         if args.reuse_only:
-            raise ValueError("No compatible completed tree could be verified; --reuse-only prevents a new GToTree run")
+            raise ValueError("No compatible completed tree could be verified under %s; --reuse-only prevents a new GToTree run" % args.outdir)
         runs = args.outdir / "runs"
         runs.mkdir(exist_ok=True)
         attempt = next(i for i in range(1, 1000000) if not (runs / ("attempt_%03d" % i)).exists())
@@ -318,9 +369,10 @@ def main(argv=None):
         compare.write_json(manifest_path, manifest)
         try:
             compare.run_command(command, log, cwd=args.outdir)
-            tree = completed_attempt(args.outdir / output, records)
+            reasons = []
+            tree = completed_attempt(args.outdir / output, records, reasons)
             if tree is None:
-                raise ValueError("GToTree did not produce a verifiable completed tree/alignment; inspect " + str(log))
+                raise ValueError("GToTree output could not be verified: %s; inspect %s" % ("; ".join(reasons), log))
             excluded = report_tree_membership(tree, records, args.outdir)
             manifest.update(status="complete", tree=str(tree.relative_to(args.outdir)), tree_sha256=compare.sha256(tree),
                             excluded_genomes=excluded)

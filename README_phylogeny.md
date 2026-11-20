@@ -80,7 +80,8 @@ run with an explicit message rather than being silently omitted.
 
 Reference tree labels include their accession, organism, strain and isolate
 when saved metadata provides those values; sample labels preserve their IDs
-with a sample prefix. Labels are sanitized to safe Newick characters. Use
+with a sample prefix. Labels are sanitized to safe Newick characters and repeated
+underscores are collapsed, matching GToTree's final label normalization. Use
 `--assembly-info /path/to/ncbi_assembly_info.tsv` to enrich older outputs before
 building labels. This does not assign reference strain names to input samples.
 
@@ -119,13 +120,25 @@ python spraynpray_phylogeny.py \
   --reuse-only
 ```
 
+GToTree also collapses repeated underscores in labels (`sample__name` becomes
+`sample_name`). Earlier helper versions generated double underscores and then
+rejected these valid normalized output labels. Recovery and membership checks
+now accept that exact normalization, and new runs generate normalized labels.
+Original manifests with double-underscore labels remain compatible. Sequence
+checksums, genome IDs and marker/tree settings must still match; arbitrary
+label differences and normalization collisions are not accepted.
+
 Recovery requires matching genome/settings signatures in an existing attempt
 manifest, a native GToTree completion log, a nonempty alignment and a final
-tree whose leaves match the submitted labels and alignment. The helper repairs
+tree whose leaves match the submitted labels and alignment after this normalization. The helper repairs
 the completion manifest and regenerates `tree_membership.csv`; the original
 tree/alignment are preserved. A later incomplete attempt does not prevent
 recovery of an earlier compatible finished one. Missing, partial or incompatible
 outputs produce an error with `--reuse-only`, rather than a new analysis.
+Rejection warnings now identify the specific mismatched settings or missing/
+incompatible artifact and print the absolute output path being checked. Confirm
+that `--outdir` points to the folder holding the original completed attempt;
+a similarly named folder elsewhere will not contain that run.
 Normal runs also attempt this recovery automatically; `--force` deliberately
 bypasses it.
 
