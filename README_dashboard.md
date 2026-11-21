@@ -49,7 +49,8 @@ The HTML embeds the report data, so its plots still work if shared alone, but
 its file downloads need the accompanying directories. Only share the ZIP with
 people authorized to receive the included genome sequences.
 
-The report provides:
+The report opens on **Assemblies**, with separate **ANI comparisons** and
+**Phylogeny** tabs. There is no Overview tab. The report provides:
 
 - Sample-by-sample assembly availability, assembler, length, contig count, N50,
   GC, circular-contig annotations and assembly downloads. Missing or invalid
@@ -64,8 +65,6 @@ The report provides:
   references, label search, click details, zoom, native Newick and SVG export.
   Pruned paths retain their summed branch lengths. When lengths are incomplete,
   the displayed tree uses and identifies topological spacing.
-- A concise interpretation and a follow-up agenda for reconciling isolate
-  origins, collection dates and culture history.
 
 ### Interpreting similarity groups
 
@@ -75,17 +74,19 @@ cross-pair has accepted ANI at or above the chosen threshold. This avoids
 joining distant samples through a chain of similar neighbors. Missing pairs
 prevent a merge; samples with no accepted sample comparisons are “Unresolved.”
 
-The overview reports distinct genomic similarity groups only when measured
-sample pairs fall below the current threshold. It gives the observed range and
-missing-pair count. Separate groups caused solely by missing comparisons do not
-support a multiple-lineage conclusion. Reference comparisons do not determine
-sample groups. ANI does not establish ancestry, transmission or chronology;
+Separate groups caused solely by missing comparisons do not support a
+multiple-lineage conclusion. Reference comparisons do not determine sample
+groups. ANI does not establish ancestry, transmission or chronology;
 interpret the marker tree, sequencing/QC results and isolate metadata together.
 For context on genome ANI, see the [FastANI primary publication](https://doi.org/10.1038/s41467-018-07641-9).
 
+After updating the script, rerun the same dashboard command to regenerate
+`dashboard.html` and the ZIP; existing HTML files do not update automatically.
 An existing bundle can be refreshed in the same folder; unrelated nonempty
-folders are rejected. Summary tables record the initial grouping threshold;
-“Current groups CSV” exports the threshold currently selected in the HTML.
+folders are rejected. Summary tables record the initial grouping threshold.
+The Assemblies tab includes the assembly summary CSV; the ANI tab includes
+the sample ANI CSV and “Current groups CSV,” which exports the threshold
+currently selected in the HTML.
 
 ## Preview cleanup
 
